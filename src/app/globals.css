@@ -1,0 +1,132 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+@import url('https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700&family=Plus+Jakarta+Sans:wght@600;700;800&display=swap');
+
+/* =============================================
+   ILRMS — Charis Microfinance Bank
+   Design System: White + Deep Navy + Gold
+   ============================================= */
+
+@layer base {
+  :root {
+    --background: 210 20% 99%;
+    --foreground: 224 47% 15%;
+
+    --card: 0 0% 100%;
+    --card-foreground: 224 47% 15%;
+
+    --popover: 0 0% 100%;
+    --popover-foreground: 224 47% 15%;
+
+    /* Deep navy #0A2540 */
+    --primary: 212 75% 14%;
+    --primary-foreground: 210 20% 99%;
+
+    --secondary: 218 30% 96%;
+    --secondary-foreground: 212 75% 14%;
+
+    --muted: 218 30% 96%;
+    --muted-foreground: 215 20% 45%;
+
+    --accent: 216 25% 94%;
+    --accent-foreground: 212 75% 14%;
+
+    --destructive: 0 75% 55%;
+    --destructive-foreground: 0 0% 100%;
+
+    --success: 152 52% 45%;
+    --success-foreground: 0 0% 100%;
+
+    --warning: 38 90% 50%;
+    --warning-foreground: 35 50% 15%;
+
+    /* Gold #C9A227 */
+    --gold: 42 67% 47%;
+    --gold-foreground: 35 50% 12%;
+
+    --border: 220 18% 90%;
+    --input: 220 18% 90%;
+    --ring: 212 50% 35%;
+
+    --radius: 0.5rem;
+
+    /* Sidebar — deep navy */
+    --sidebar: 212 75% 12%;
+    --sidebar-foreground: 210 20% 94%;
+    --sidebar-primary: 42 67% 50%;
+    --sidebar-primary-foreground: 35 50% 12%;
+    --sidebar-accent: 212 55% 20%;
+    --sidebar-accent-foreground: 0 0% 100%;
+    --sidebar-border: 212 45% 20%;
+
+    --chart-1: 212 75% 30%;
+    --chart-2: 42 67% 47%;
+    --chart-3: 152 52% 45%;
+    --chart-4: 207 65% 50%;
+    --chart-5: 0 75% 55%;
+  }
+
+  .dark {
+    --background: 224 30% 10%;
+    --foreground: 210 20% 96%;
+    --card: 224 25% 14%;
+    --card-foreground: 210 20% 96%;
+    --popover: 224 25% 14%;
+    --popover-foreground: 210 20% 96%;
+    --primary: 210 20% 88%;
+    --primary-foreground: 224 25% 14%;
+    --secondary: 224 20% 20%;
+    --secondary-foreground: 210 20% 96%;
+    --muted: 224 20% 20%;
+    --muted-foreground: 215 15% 60%;
+    --accent: 224 20% 24%;
+    --accent-foreground: 210 20% 96%;
+    --destructive: 0 70% 60%;
+    --destructive-foreground: 0 0% 100%;
+    --success: 152 52% 55%;
+    --warning: 38 85% 60%;
+    --gold: 42 72% 60%;
+    --border: 224 15% 22%;
+    --input: 224 15% 22%;
+    --ring: 212 40% 50%;
+    --sidebar: 224 35% 9%;
+    --sidebar-foreground: 210 20% 90%;
+    --sidebar-primary: 42 72% 58%;
+    --sidebar-primary-foreground: 35 50% 12%;
+    --sidebar-accent: 224 25% 18%;
+    --sidebar-accent-foreground: 210 20% 96%;
+    --sidebar-border: 224 25% 15%;
+  }
+
+  * {
+    @apply border-border;
+  }
+
+  body {
+    @apply bg-background text-foreground;
+    font-family: 'Inter', system-ui, sans-serif;
+    -webkit-font-smoothing: antialiased;
+  }
+
+  h1, h2, h3, h4 {
+    font-family: 'Plus Jakarta Sans', 'Inter', system-ui, sans-serif;
+    letter-spacing: -0.01em;
+  }
+}
+
+@layer utilities {
+  .brand-gradient {
+    background: linear-gradient(135deg, hsl(212, 75%, 14%) 0%, hsl(212, 55%, 22%) 100%);
+  }
+  .gold-gradient {
+    background: linear-gradient(135deg, hsl(42, 67%, 47%) 0%, hsl(40, 80%, 58%) 100%);
+  }
+  .text-success { color: hsl(var(--success)); }
+  .text-warning { color: hsl(var(--warning)); }
+  .text-gold { color: hsl(var(--gold)); }
+  .bg-success { background-color: hsl(var(--success)); }
+  .bg-warning { background-color: hsl(var(--warning)); }
+  .bg-gold { background-color: hsl(var(--gold)); }
+}
