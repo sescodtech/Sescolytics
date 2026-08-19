@@ -11,6 +11,7 @@ import type {
   CategoryBreakdown,
 } from "./types";
 import { isObligationCategory } from "./categorizer";
+import { detectPrimaryIncome, detectRecurringObligations } from "./recurrence";
 
 const MONTH_LABELS = [
   "January", "February", "March", "April", "May", "June",
@@ -20,6 +21,12 @@ const MONTH_LABELS = [
 function monthLabel(monthKey: string): string {
   const [y, m] = monthKey.split("-");
   return `${MONTH_LABELS[parseInt(m, 10) - 1]} ${y}`;
+}
+
+function ordinal(n: number): string {
+  const s = ["th", "st", "nd", "rd"];
+  const v = n % 100;
+  return `${n}${s[(v - 20) % 10] || s[v] || s[0]}`;
 }
 
 /** Only clean, non-duplicate transactions with a usable date feed the analysis totals. */
@@ -93,7 +100,22 @@ export function buildCreditAnalysis(transactions: NormalizedTransaction[], month
 
   const obligationOutflows = clean.filter((t) => t.direction === "outflow" && isObligationCategory(t.category));
   const totalObligations = obligationOutflows.reduce((s, t) => s + t.debit, 0);
-  const existingObligations = monthsAnalyzed ? totalObligations / monthsAnalyzed : 0;
+
+  // Smart detection: recurring counterparty + similar amount + similar day of
+  // month, month after month — catches income and obligations even when the
+  // narration itself gives no clue (no "SALARY"/"LOAN" keyword required).
+  const primaryIncome = detectPrimaryIncome(clean, monthsAnalyzed);
+  const recurringObligations = detectRecurringObligations(clean, monthsAnalyzed);
+
+  // Avoid double-counting: only add recurring patterns not already captured
+  // by the keyword-based "Loan Repayment" category above.
+  const recurringObligationsMonthly = recurringObligations
+    .filter((p) => p.category !== "Loan Repayment")
+    .reduce((s, p) => s + (p.avgAmount * p.occurrences) / Math.max(1, monthsAnalyzed), 0);
+
+  const existingObligations = monthsAnalyzed
+    ? totalObligations / monthsAnalyzed + recurringObligationsMonthly
+    : 0;
 
   // Income consistency: coefficient of variation of monthly inflow, inverted
   // into a 0-100 "consistency" score (100 = perfectly steady income).
@@ -158,6 +180,15 @@ export function buildCreditAnalysis(transactions: NormalizedTransaction[], month
     notes.push(`Only ${monthsAnalyzed} month(s) of statement data available — assessment confidence is limited.`);
   }
 
+  if (primaryIncome) {
+    points += primaryIncome.confidencePct >= 70 ? 1 : 0;
+    notes.push(
+      `Primary income identified: ~${primaryIncome.avgAmount.toLocaleString("en-NG", { style: "currency", currency: "NGN", maximumFractionDigits: 0 })} landing around the ${ordinal(primaryIncome.avgDayOfMonth)} of the month, seen in ${primaryIncome.occurrences} of ${monthsAnalyzed} months (${primaryIncome.confidencePct}% pattern confidence).`
+    );
+  } else {
+    notes.push("No single clearly recurring income source was identified — inflow may come from multiple/irregular sources.");
+  }
+
   let assessment: CreditAnalysis["assessment"];
   if (monthsAnalyzed < 2) {
     assessment = "Low";
@@ -183,6 +214,8 @@ export function buildCreditAnalysis(transactions: NormalizedTransaction[], month
     cashflowStabilityPct,
     positiveMonths,
     negativeMonths,
+    primaryIncome,
+    recurringObligations,
     assessment,
     assessmentNotes: notes,
   };

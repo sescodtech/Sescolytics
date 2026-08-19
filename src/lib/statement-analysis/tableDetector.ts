@@ -60,6 +60,79 @@ export function detectColumnMapping(rows: RawParsedRow[]): ColumnMapping {
   return mapping;
 }
 
+// ── Header-row scanning ──────────────────────────────────────────────────
+// Real-world exports rarely start with the transaction header on row 1:
+// some have a blank spacer row first, others have 10-20 rows of bank
+// letterhead / account summary above the real table. Instead of assuming
+// row 1 is the header, scan the first N rows for whichever one actually
+// looks like a transaction header (matches the most known field aliases),
+// and treat that as the header row — everything above it is ignored.
+
+const ALL_ALIASES: string[] = Object.values(FIELD_ALIASES).flat() as string[];
+
+function scoreHeaderRow(cells: string[]): number {
+  let score = 0;
+  for (const cell of cells) {
+    const nh = normHeader(String(cell ?? ""));
+    if (!nh) continue;
+    if (ALL_ALIASES.some((a) => nh === a || nh.includes(a) || a.includes(nh))) score += 1;
+  }
+  return score;
+}
+
+export interface HeaderDetection {
+  headerRowIndex: number; // index within the raw matrix
+  headers: string[];
+  score: number;
+}
+
+/** Scan the first `maxScan` rows of a raw (headerless) matrix for the real header row. */
+export function findHeaderRow(matrix: string[][], maxScan = 60): HeaderDetection | null {
+  let best: HeaderDetection | null = null;
+  const limit = Math.min(matrix.length, maxScan);
+  for (let i = 0; i < limit; i++) {
+    const row = (matrix[i] || []).map((c) => String(c ?? ""));
+    const score = scoreHeaderRow(row);
+    // Require at least a date-like column plus one amount-like column so a
+    // stray row that happens to contain the word "balance" isn't mistaken
+    // for the header (e.g. "Closing Balance: 10,000.00" in a summary block).
+    if (score >= 2 && (!best || score > best.score)) {
+      best = { headerRowIndex: i, headers: row.map((c) => c.trim()), score };
+    }
+  }
+  return best;
+}
+
+/** Turn a raw matrix + a known header row into normal {header: value} row objects. */
+export function matrixToRows(matrix: string[][], headerRowIndex: number, headers: string[]): RawParsedRow[] {
+  const seen = new Map<string, number>();
+  const keys = headers.map((h, idx) => {
+    const base = h || `Column ${idx + 1}`;
+    const count = seen.get(base) ?? 0;
+    seen.set(base, count + 1);
+    return count === 0 ? base : `${base} (${count + 1})`;
+  });
+
+  const rows: RawParsedRow[] = [];
+  for (let r = headerRowIndex + 1; r < matrix.length; r++) {
+    const rowArr = matrix[r] || [];
+    if (rowArr.every((c) => String(c ?? "").trim() === "")) continue; // skip blank spacer rows
+    const obj: RawParsedRow = {};
+    keys.forEach((k, idx) => {
+      obj[k] = String(rowArr[idx] ?? "").trim();
+    });
+    rows.push(obj);
+  }
+  return rows;
+}
+
+/** Convenience: raw matrix in, normal rows out, using whichever row scores best as the header. */
+export function extractRowsFromMatrix(matrix: string[][]): { rows: RawParsedRow[]; detection: HeaderDetection | null } {
+  const detection = findHeaderRow(matrix);
+  if (!detection) return { rows: [], detection: null };
+  return { rows: matrixToRows(matrix, detection.headerRowIndex, detection.headers), detection };
+}
+
 // ── PDF / OCR line-based extraction ─────────────────────────────────────
 // Statement lines commonly look like one of:
 //   12/01/2026  POS PURCHASE-SHOPRITE LAGOS          5,000.00        120,450.00

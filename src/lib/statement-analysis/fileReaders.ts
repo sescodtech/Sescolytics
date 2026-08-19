@@ -7,6 +7,7 @@
 import * as XLSX from "xlsx";
 import Papa from "papaparse";
 import type { FileKind, RawParsedRow } from "./types";
+import { extractRowsFromMatrix } from "./tableDetector";
 
 export type ProgressFn = (message: string, pct?: number) => void;
 
@@ -21,14 +22,18 @@ export function detectFileKind(file: File): FileKind | null {
 }
 
 // ── CSV ──────────────────────────────────────────────────────────────────
+// Read headerless so we can scan for the real header row ourselves — some
+// exports have a blank spacer row or metadata above the transaction table.
 export function parseCsv(file: File): Promise<RawParsedRow[]> {
   return new Promise((resolve, reject) => {
-    Papa.parse<RawParsedRow>(file, {
-      header: true,
+    Papa.parse<string[]>(file, {
+      header: false,
       skipEmptyLines: "greedy",
       dynamicTyping: false,
-      transformHeader: (h) => h.trim(),
-      complete: (res) => resolve(res.data.filter((r) => Object.values(r).some((v) => String(v ?? "").trim() !== ""))),
+      complete: (res) => {
+        const { rows } = extractRowsFromMatrix(res.data as string[][]);
+        resolve(rows);
+      },
       error: (err) => reject(err),
     });
   });
@@ -43,13 +48,24 @@ export function parseXlsx(file: File): Promise<RawParsedRow[]> {
       try {
         const data = e.target?.result;
         const workbook = XLSX.read(data, { type: "array", cellDates: false, raw: true });
-        // Some banks export multiple sheets (summary + transactions) — use the
-        // sheet with the most rows, which is almost always the transaction list.
+        // Some banks export multiple sheets (summary + transactions) — try
+        // each sheet's own header scan and keep whichever is most confident
+        // (highest header match score, then most rows as a tie-breaker).
         let best: RawParsedRow[] = [];
+        let bestScore = -1;
         for (const sheetName of workbook.SheetNames) {
           const sheet = workbook.Sheets[sheetName];
-          const rows = XLSX.utils.sheet_to_json<RawParsedRow>(sheet, { defval: "", raw: false });
-          if (rows.length > best.length) best = rows as RawParsedRow[];
+          const matrix = XLSX.utils.sheet_to_json<string[]>(sheet, {
+            header: 1,
+            defval: "",
+            raw: false,
+          }) as unknown as string[][];
+          const { rows, detection } = extractRowsFromMatrix(matrix);
+          if (!detection) continue;
+          if (detection.score > bestScore || (detection.score === bestScore && rows.length > best.length)) {
+            bestScore = detection.score;
+            best = rows;
+          }
         }
         resolve(best);
       } catch (err) {

@@ -81,6 +81,12 @@ export function exportStatementReportPdf(upload: StatementUploadRow, report: Sta
       ["Existing Obligations (avg/mo)", formatCurrency(c.existingObligations)],
       ["Income Consistency", `${c.incomeConsistencyPct}%`],
       ["Cash-flow Stability", `${c.cashflowStabilityPct}% of months positive`],
+      [
+        "Primary Income Source",
+        c.primaryIncome
+          ? `${formatCurrency(c.primaryIncome.avgAmount)}/mo (${c.primaryIncome.confidencePct}% confidence, day ~${c.primaryIncome.avgDayOfMonth})`
+          : "Not clearly identified",
+      ],
       ["Credit Assessment", c.assessment],
     ],
     theme: "plain",

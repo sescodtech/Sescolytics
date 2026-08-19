@@ -55,6 +55,23 @@ export interface MonthlyBucket {
   outflowBreakdown: CategoryBreakdown;
 }
 
+export interface RecurringPattern {
+  signature: string; // normalised narration used to group these
+  sampleNarration: string; // original narration text, for display
+  direction: Direction;
+  category: string;
+  avgAmount: number;
+  minAmount: number;
+  maxAmount: number;
+  occurrences: number;
+  monthsSeen: string[]; // YYYY-MM
+  avgDayOfMonth: number;
+  dayOfMonthConsistencyPct: number; // 0-100, higher = lands on same day each time
+  amountConsistencyPct: number; // 0-100, higher = same amount each time
+  confidencePct: number; // 0-100 overall
+  isLikelyIncome: boolean; // heuristic: recurring inflow, monthly-ish cadence
+}
+
 export interface CreditAnalysis {
   monthsAnalyzed: number;
   avgMonthlyInflow: number;
@@ -68,6 +85,8 @@ export interface CreditAnalysis {
   cashflowStabilityPct: number; // 0-100, higher = more months with positive/near-flat net
   positiveMonths: number;
   negativeMonths: number;
+  primaryIncome: RecurringPattern | null;
+  recurringObligations: RecurringPattern[];
   assessment: "Low" | "Moderate" | "Strong";
   assessmentNotes: string[];
 }

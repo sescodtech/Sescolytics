@@ -246,6 +246,46 @@ export default function StatementDetailPage({ params }: { params: Promise<{ id: 
               <CreditFigure label="Income Consistency" value={`${report.credit.incomeConsistencyPct}%`} />
               <CreditFigure label="Cash-flow Stability" value={`${report.credit.cashflowStabilityPct}%`} sub={`${report.credit.positiveMonths}/${report.credit.monthsAnalyzed} months positive`} />
             </div>
+
+            {/* Primary income + recurring obligations — pattern-detected, not keyword-based */}
+            <div className="grid md:grid-cols-2 gap-4 mb-5">
+              <div className="border border-border rounded-lg p-3.5">
+                <p className="text-[11px] font-medium text-muted-foreground uppercase tracking-wide mb-2">Primary Income Source</p>
+                {report.credit.primaryIncome ? (
+                  <div>
+                    <div className="flex items-baseline justify-between">
+                      <span className="text-lg font-display font-bold text-foreground">{formatCurrency(report.credit.primaryIncome.avgAmount)}</span>
+                      <span className="text-xs font-medium text-success">{report.credit.primaryIncome.confidencePct}% confidence</span>
+                    </div>
+                    <p className="text-xs text-muted-foreground mt-0.5 truncate" title={report.credit.primaryIncome.sampleNarration}>
+                      {report.credit.primaryIncome.sampleNarration}
+                    </p>
+                    <p className="text-[11px] text-muted-foreground mt-1">
+                      Lands ~day {report.credit.primaryIncome.avgDayOfMonth} · seen in {report.credit.primaryIncome.occurrences} of {report.credit.monthsAnalyzed} months
+                    </p>
+                  </div>
+                ) : (
+                  <p className="text-xs text-muted-foreground">No single clearly recurring income source identified.</p>
+                )}
+              </div>
+              <div className="border border-border rounded-lg p-3.5">
+                <p className="text-[11px] font-medium text-muted-foreground uppercase tracking-wide mb-2">
+                  Recurring Payments {report.credit.recurringObligations.length > 0 && `(${report.credit.recurringObligations.length})`}
+                </p>
+                {report.credit.recurringObligations.length > 0 ? (
+                  <div className="space-y-1.5 max-h-28 overflow-y-auto pr-1">
+                    {report.credit.recurringObligations.map((p, i) => (
+                      <div key={i} className="flex items-center justify-between text-xs">
+                        <span className="text-foreground truncate max-w-[60%]" title={p.sampleNarration}>{p.sampleNarration}</span>
+                        <span className="text-destructive font-medium">{formatCurrency(p.avgAmount)}/mo</span>
+                      </div>
+                    ))}
+                  </div>
+                ) : (
+                  <p className="text-xs text-muted-foreground">No recurring payments detected.</p>
+                )}
+              </div>
+            </div>
             <div className="border-t border-border pt-4">
               <p className="text-xs font-medium text-muted-foreground mb-2">Supporting notes</p>
               <ul className="space-y-1.5">
