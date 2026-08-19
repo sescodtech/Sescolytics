@@ -21,29 +21,27 @@ export async function runExtractionPipeline(file: File, onProgress?: ProgressFn)
   onProgress?.("Detecting statement format", 5);
 
   if (kind === "csv") {
-    const rows = await parseCsv(file);
+    const { rows, metaLines } = await parseCsv(file);
     if (!rows.length) throw new Error("The CSV file appears to be empty.");
     onProgress?.("Mapping columns", 30);
     const mapping = detectColumnMapping(rows);
     ensureMappingUsable(mapping, warnings);
     onProgress?.("Normalising transactions", 60);
     const transactions = await normalizeMappedRows(rows, mapping);
-    const metaText = rows.map((r) => Object.values(r).join(" ")).join(" ");
-    const meta = guessStatementMetadata(metaText);
+    const meta = guessStatementMetadata(metaLines.length ? metaLines : rows.slice(0, 5).map((r) => Object.values(r).join(" ")));
     onProgress?.("Done", 100);
     return { transactions, method: "csv", warnings, bankNameGuess: meta.bankName, accountNumberGuess: meta.accountNumber, accountNameGuess: meta.accountName };
   }
 
   if (kind === "xlsx") {
-    const rows = await parseXlsx(file);
+    const { rows, metaLines } = await parseXlsx(file);
     if (!rows.length) throw new Error("The spreadsheet appears to be empty.");
     onProgress?.("Mapping columns", 30);
     const mapping = detectColumnMapping(rows);
     ensureMappingUsable(mapping, warnings);
     onProgress?.("Normalising transactions", 60);
     const transactions = await normalizeMappedRows(rows, mapping);
-    const metaText = rows.map((r) => Object.values(r).join(" ")).join(" ");
-    const meta = guessStatementMetadata(metaText);
+    const meta = guessStatementMetadata(metaLines.length ? metaLines : rows.slice(0, 5).map((r) => Object.values(r).join(" ")));
     onProgress?.("Done", 100);
     return { transactions, method: "xlsx", warnings, bankNameGuess: meta.bankName, accountNumberGuess: meta.accountNumber, accountNameGuess: meta.accountName };
   }
@@ -58,7 +56,7 @@ export async function runExtractionPipeline(file: File, onProgress?: ProgressFn)
       warnings.push("Could not confidently detect transaction rows in this PDF. All extracted lines have been flagged for manual review.");
     }
     const transactions = await normalizeParsedLines(lines);
-    const meta = guessStatementMetadata(extraction.lines.join(" "));
+    const meta = guessStatementMetadata(extraction.lines);
     onProgress?.("Done", 100);
     return { transactions, method: actualKind, warnings, bankNameGuess: meta.bankName, accountNumberGuess: meta.accountNumber, accountNameGuess: meta.accountName };
   }
@@ -71,7 +69,7 @@ export async function runExtractionPipeline(file: File, onProgress?: ProgressFn)
       warnings.push("Could not confidently detect transaction rows in this image. Try a clearer scan or a PDF/CSV export instead.");
     }
     const transactions = await normalizeParsedLines(lines);
-    const meta = guessStatementMetadata(ocrLines.join(" "));
+    const meta = guessStatementMetadata(ocrLines);
     onProgress?.("Done", 100);
     return { transactions, method: "image", warnings, bankNameGuess: meta.bankName, accountNumberGuess: meta.accountNumber, accountNameGuess: meta.accountName };
   }

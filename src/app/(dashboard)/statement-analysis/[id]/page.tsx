@@ -14,7 +14,7 @@ import { StatCard } from "@/components/StatCard";
 import { PageHeader } from "@/components/PageHeader";
 import { formatCurrency, formatDate, cn } from "@/lib/utils";
 import { getUpload, listTransactions, updateTransaction } from "@/lib/statement-analysis/data";
-import { exportStatementReportPdf } from "@/lib/statement-analysis/reportExport";
+import { exportStatementReportPdf, exportStatementReportExcel } from "@/lib/statement-analysis/reportExport";
 import type { StatementTransactionRow } from "@/lib/statement-analysis/types";
 import { toast } from "sonner";
 
@@ -90,16 +90,24 @@ export default function StatementDetailPage({ params }: { params: Promise<{ id: 
       </Link>
 
       <PageHeader
-        title={upload.applicant_name || upload.filename}
+        title={upload.applicant_name || upload.account_name || upload.filename}
         description={`${upload.bank_name || "Bank not detected"} ${upload.account_number ? `· ${upload.account_number}` : ""}`}
       >
         {report && (
-          <button
-            onClick={() => exportStatementReportPdf(upload, report)}
-            className="flex items-center gap-2 px-4 py-2 border border-border rounded-lg text-sm font-medium hover:bg-muted/40"
-          >
-            <Download className="w-4 h-4" /> Export Report
-          </button>
+          <div className="flex items-center gap-2">
+            <button
+              onClick={() => exportStatementReportExcel(upload, report, transactions)}
+              className="flex items-center gap-2 px-4 py-2 border border-border rounded-lg text-sm font-medium hover:bg-muted/40"
+            >
+              <Download className="w-4 h-4" /> Export Excel
+            </button>
+            <button
+              onClick={() => exportStatementReportPdf(upload, report)}
+              className="flex items-center gap-2 px-4 py-2 border border-border rounded-lg text-sm font-medium hover:bg-muted/40"
+            >
+              <Download className="w-4 h-4" /> Export PDF
+            </button>
+          </div>
         )}
       </PageHeader>
 

@@ -327,8 +327,8 @@ export default function StatementAnalysisPage() {
                       <div className="flex items-center gap-2 min-w-0">
                         {(() => { const Icon = fileIcon(u.filename); return <Icon className="w-4 h-4 text-primary flex-shrink-0" />; })()}
                         <div className="min-w-0">
-                          <p className="font-medium text-foreground truncate">{u.applicant_name || u.filename}</p>
-                          {u.applicant_name && <p className="text-xs text-muted-foreground truncate">{u.filename}</p>}
+                          <p className="font-medium text-foreground truncate">{u.applicant_name || u.account_name || u.filename}</p>
+                          {(u.applicant_name || u.account_name) && <p className="text-xs text-muted-foreground truncate">{u.filename}</p>}
                         </div>
                       </div>
                     </td>

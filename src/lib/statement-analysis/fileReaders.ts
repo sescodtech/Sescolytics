@@ -24,15 +24,15 @@ export function detectFileKind(file: File): FileKind | null {
 // ── CSV ──────────────────────────────────────────────────────────────────
 // Read headerless so we can scan for the real header row ourselves — some
 // exports have a blank spacer row or metadata above the transaction table.
-export function parseCsv(file: File): Promise<RawParsedRow[]> {
+export function parseCsv(file: File): Promise<{ rows: RawParsedRow[]; metaLines: string[] }> {
   return new Promise((resolve, reject) => {
     Papa.parse<string[]>(file, {
       header: false,
       skipEmptyLines: "greedy",
       dynamicTyping: false,
       complete: (res) => {
-        const { rows } = extractRowsFromMatrix(res.data as string[][]);
-        resolve(rows);
+        const { rows, metaLines } = extractRowsFromMatrix(res.data as string[][]);
+        resolve({ rows, metaLines });
       },
       error: (err) => reject(err),
     });
@@ -40,7 +40,7 @@ export function parseCsv(file: File): Promise<RawParsedRow[]> {
 }
 
 // ── XLSX / XLS ───────────────────────────────────────────────────────────
-export function parseXlsx(file: File): Promise<RawParsedRow[]> {
+export function parseXlsx(file: File): Promise<{ rows: RawParsedRow[]; metaLines: string[] }> {
   return new Promise((resolve, reject) => {
     const reader = new FileReader();
     reader.onerror = () => reject(new Error("Failed to read file"));
@@ -52,6 +52,7 @@ export function parseXlsx(file: File): Promise<RawParsedRow[]> {
         // each sheet's own header scan and keep whichever is most confident
         // (highest header match score, then most rows as a tie-breaker).
         let best: RawParsedRow[] = [];
+        let bestMeta: string[] = [];
         let bestScore = -1;
         for (const sheetName of workbook.SheetNames) {
           const sheet = workbook.Sheets[sheetName];
@@ -60,14 +61,15 @@ export function parseXlsx(file: File): Promise<RawParsedRow[]> {
             defval: "",
             raw: false,
           }) as unknown as string[][];
-          const { rows, detection } = extractRowsFromMatrix(matrix);
+          const { rows, detection, metaLines } = extractRowsFromMatrix(matrix);
           if (!detection) continue;
           if (detection.score > bestScore || (detection.score === bestScore && rows.length > best.length)) {
             bestScore = detection.score;
             best = rows;
+            bestMeta = metaLines;
           }
         }
-        resolve(best);
+        resolve({ rows: best, metaLines: bestMeta });
       } catch (err) {
         reject(err);
       }
