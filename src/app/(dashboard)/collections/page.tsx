@@ -3,6 +3,7 @@
 import { useState } from "react";
 import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
 import { supabase } from "@/lib/supabase/client";
+import { ensureStatusesFresh } from "@/lib/statusRefresh";
 import { PageHeader } from "@/components/PageHeader";
 import { StatusBadge } from "@/components/StatusBadge";
 import { formatCurrency, formatDate, getLoanStatusColor, getCollectionStatusColor } from "@/lib/utils";
@@ -91,6 +92,7 @@ export default function CollectionsPage() {
   const { data: loans = [], isLoading } = useQuery({
     queryKey: ["collections"],
     queryFn: async () => {
+      await ensureStatusesFresh();
       const { data } = await supabase
         .from("loans")
         .select("*")

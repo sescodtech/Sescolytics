@@ -3,10 +3,11 @@
 import { useState } from "react";
 import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
 import { supabase } from "@/lib/supabase/client";
+import { ensureStatusesFresh } from "@/lib/statusRefresh";
 import { PageHeader } from "@/components/PageHeader";
 import { StatusBadge } from "@/components/StatusBadge";
 import { formatDateTime, formatCurrency, formatDate } from "@/lib/utils";
-import { Search, Mail, MessageCircle, Phone, Send, X, AlertTriangle, CheckCircle2 } from "lucide-react";
+import { Search, Mail, MessageCircle, Phone, Send, X, AlertTriangle, CheckCircle2, RefreshCw } from "lucide-react";
 import { toast } from "sonner";
 import type { Tables } from "@/lib/supabase/types";
 
@@ -18,10 +19,12 @@ type OverdueLoan = {
   loan_number: string;
   customer_name: string;
   customer_phone: string | null;
+  customer_email: string | null;
   outstanding_balance: number;
   due_date: string;
   status: string;
   collection_status: string;
+  assigned_officer_id: string | null;
 };
 
 const getStatusColor = (s: string) => ({
@@ -61,18 +64,41 @@ function SendReminderModal({ onClose }: { onClose: () => void }) {
   const [customMessage, setCustomMessage] = useState("");
   const [search, setSearch] = useState("");
   const [sending, setSending] = useState(false);
-  const [results, setResults] = useState<{ sent: number; failed: number } | null>(null);
+  const [results, setResults] = useState<{ sent: number; failed: number; reasons: string[] } | null>(null);
 
   const { data: overdueLoans = [] } = useQuery({
     queryKey: ["overdue-for-reminder"],
     queryFn: async () => {
+      await ensureStatusesFresh();
       const { data } = await supabase
         .from("loans")
-        .select("id, loan_number, customer_name, customer_phone, outstanding_balance, due_date, status, collection_status")
+        .select("id, loan_number, customer_name, customer_phone, outstanding_balance, due_date, status, collection_status, assigned_officer_id, customers(email)")
         .in("status", ["overdue", "due_today", "due_tomorrow"])
         .neq("collection_status", "fully_paid")
         .order("outstanding_balance", { ascending: false });
-      return (data ?? []) as OverdueLoan[];
+      return (data ?? []).map((l: Record<string, unknown>) => ({
+        ...l,
+        customer_email: (l.customers as { email: string | null } | null)?.email ?? null,
+      })) as OverdueLoan[];
+    },
+  });
+
+  const { data: configStatus } = useQuery({
+    queryKey: ["reminder-config-status"],
+    queryFn: async () => {
+      const res = await fetch("/api/reminder-config-status");
+      if (!res.ok) return { smsConfigured: false, emailConfigured: false };
+      return res.json() as Promise<{ smsConfigured: boolean; emailConfigured: boolean }>;
+    },
+  });
+
+  const { data: officerMap = {} } = useQuery({
+    queryKey: ["officer-name-map"],
+    queryFn: async () => {
+      const { data } = await supabase.from("profiles").select("id, full_name");
+      const map: Record<string, string> = {};
+      (data ?? []).forEach((p: { id: string; full_name: string }) => { map[p.id] = p.full_name; });
+      return map;
     },
   });
 
@@ -107,14 +133,16 @@ function SendReminderModal({ onClose }: { onClose: () => void }) {
 
   const handleSend = async () => {
     setSending(true);
-    let sent = 0, failed = 0;
 
     const loansToSend = overdueLoans.filter(l => selectedLoans.has(l.id));
     const messageTemplate = customMessage || selectedTemplate?.body || "";
 
-    // Build payloads for the API
+    // Build payloads for the API. Anything that can't be sent (no phone for
+    // sms/whatsapp, no email on file for email) is tracked as a skip up
+    // front — it must never be silently logged as "sent".
     const smsRecipients: { to: string; message: string; loan_id: string; channel: "sms" | "whatsapp" }[] = [];
     const emailRecipients: { to: string; subject: string; message: string; customer_name: string; loan_id: string }[] = [];
+    const skipped: { loan: OverdueLoan; reason: string }[] = [];
 
     for (const loan of loansToSend) {
       const message = fillTemplate(messageTemplate, loan);
@@ -123,28 +151,23 @@ function SendReminderModal({ onClose }: { onClose: () => void }) {
         : `Loan Repayment Notice — ${loan.loan_number}`;
 
       if (channel === "email") {
-        // Use customer phone as placeholder if no email — real email would come from customers table
-        emailRecipients.push({
-          to: loan.customer_name, // replace with loan.customer_email when available
-          subject,
-          message,
-          customer_name: loan.customer_name,
-          loan_id: loan.id,
-        });
+        if (loan.customer_email) {
+          emailRecipients.push({ to: loan.customer_email, subject, message, customer_name: loan.customer_name, loan_id: loan.id });
+        } else {
+          skipped.push({ loan, reason: "No email address on file for this customer" });
+        }
       } else {
         if (loan.customer_phone) {
-          smsRecipients.push({
-            to: loan.customer_phone,
-            message,
-            loan_id: loan.id,
-            channel: channel as "sms" | "whatsapp",
-          });
+          smsRecipients.push({ to: loan.customer_phone, message, loan_id: loan.id, channel });
+        } else {
+          skipped.push({ loan, reason: "No phone number on file for this customer" });
         }
       }
     }
 
     // Call the appropriate API route
     let apiResults = { sent: 0, failed: 0, details: { sent: [] as string[], failed: [] as { to: string; error: string }[] } };
+    let apiCallError: string | null = null;
 
     try {
       if (channel === "email" && emailRecipients.length > 0) {
@@ -153,45 +176,54 @@ function SendReminderModal({ onClose }: { onClose: () => void }) {
           headers: { "Content-Type": "application/json" },
           body: JSON.stringify({ recipients: emailRecipients }),
         });
-        if (res.ok) apiResults = await res.json();
-      } else if (smsRecipients.length > 0) {
+        if (res.ok) {
+          apiResults = await res.json();
+        } else {
+          const body = await res.json().catch(() => ({}));
+          apiCallError = body.error || `Email provider returned an error (${res.status})`;
+        }
+      } else if (channel !== "email" && smsRecipients.length > 0) {
         const res = await fetch("/api/send-reminder", {
           method: "POST",
           headers: { "Content-Type": "application/json" },
           body: JSON.stringify({ recipients: smsRecipients }),
         });
-        if (res.ok) apiResults = await res.json();
+        if (res.ok) {
+          apiResults = await res.json();
+        } else {
+          const body = await res.json().catch(() => ({}));
+          apiCallError = body.error || `SMS/WhatsApp provider returned an error (${res.status})`;
+        }
       }
     } catch (err) {
-      console.error("API send error:", err);
+      apiCallError = err instanceof Error ? err.message : "Network error contacting the send provider";
     }
 
-    // Log every reminder to Supabase regardless of delivery status
-    for (const loan of loansToSend) {
-      const message = fillTemplate(messageTemplate, loan);
-      const recipient = channel === "email"
-        ? loan.customer_name
-        : (loan.customer_phone ?? "no-phone");
+    let sent = 0, failed = 0;
+    const reasons: string[] = [];
 
-      const wasDelivered = apiResults.details.sent.includes(recipient);
-      const failDetail = apiResults.details.failed.find((f) => f.to === recipient);
+    // Log the loans that were actually attempted
+    const attempted = channel === "email" ? emailRecipients : smsRecipients;
+    for (const rec of attempted) {
+      const loan = loansToSend.find((l) => l.id === rec.loan_id)!;
+      const wasDelivered = apiResults.details.sent.includes(rec.to);
+      const failDetail = apiResults.details.failed.find((f) => f.to === rec.to);
+      const errorMessage = failDetail?.error ?? apiCallError ?? (wasDelivered ? null : "Delivery status unknown — provider did not confirm");
 
       const { error } = await supabase.from("reminders").insert({
         loan_id: loan.id,
         channel,
-        recipient,
-        message,
-        subject: selectedTemplate?.subject ? fillTemplate(selectedTemplate.subject, loan) : null,
+        recipient: rec.to,
+        message: rec.message,
+        subject: channel === "email" ? (rec as typeof emailRecipients[number]).subject : null,
         template_id: selectedTemplate?.id ?? null,
-        status: smsRecipients.length === 0 && emailRecipients.length === 0
-          ? "sent"  // no API configured yet — log as sent for record-keeping
-          : wasDelivered ? "sent" : failDetail ? "failed" : "queued",
-        error: failDetail?.error ?? null,
+        status: wasDelivered ? "sent" : "failed",
+        error: wasDelivered ? null : errorMessage,
         sent_at: wasDelivered ? new Date().toISOString() : null,
         reason: loan.status,
       });
 
-      if (!error) {
+      if (wasDelivered && !error) {
         await supabase.from("loans")
           .update({ collection_status: "reminder_sent" })
           .eq("id", loan.id)
@@ -199,11 +231,31 @@ function SendReminderModal({ onClose }: { onClose: () => void }) {
         sent++;
       } else {
         failed++;
+        if (errorMessage && !reasons.includes(errorMessage)) reasons.push(errorMessage);
       }
     }
 
+    // Log skipped loans too (no phone/email on file) — visible in history as
+    // failed with a clear reason, never silently dropped.
+    for (const { loan, reason } of skipped) {
+      await supabase.from("reminders").insert({
+        loan_id: loan.id,
+        channel,
+        recipient: channel === "email" ? (loan.customer_email || "no-email") : (loan.customer_phone || "no-phone"),
+        message: fillTemplate(messageTemplate, loan),
+        subject: selectedTemplate?.subject ? fillTemplate(selectedTemplate.subject, loan) : null,
+        template_id: selectedTemplate?.id ?? null,
+        status: "failed",
+        error: reason,
+        sent_at: null,
+        reason: loan.status,
+      });
+      failed++;
+      if (!reasons.includes(reason)) reasons.push(reason);
+    }
+
     setSending(false);
-    setResults({ sent, failed });
+    setResults({ sent, failed, reasons });
     queryClient.invalidateQueries({ queryKey: ["reminders"] });
     queryClient.invalidateQueries({ queryKey: ["collections"] });
   };
@@ -244,16 +296,26 @@ function SendReminderModal({ onClose }: { onClose: () => void }) {
           {/* Results screen */}
           {results ? (
             <div className="flex flex-col items-center justify-center py-16 px-6 text-center">
-              <CheckCircle2 className="w-12 h-12 text-success mb-4" />
-              <h3 className="text-lg font-bold text-foreground mb-2">Reminders Logged</h3>
+              {results.sent > 0 ? (
+                <CheckCircle2 className="w-12 h-12 text-success mb-4" />
+              ) : (
+                <AlertTriangle className="w-12 h-12 text-amber-500 mb-4" />
+              )}
+              <h3 className="text-lg font-bold text-foreground mb-2">
+                {results.sent > 0 ? "Reminders Sent" : "Nothing Was Sent"}
+              </h3>
               <p className="text-muted-foreground mb-4">
-                <span className="font-semibold text-success">{results.sent} reminders</span> logged successfully
+                <span className="font-semibold text-success">{results.sent} delivered</span>
                 {results.failed > 0 && <>, <span className="font-semibold text-destructive">{results.failed} failed</span></>}
               </p>
-              <div className="bg-amber-50 border border-amber-200 rounded-lg px-4 py-3 text-sm text-amber-800 text-left max-w-sm">
-                <p className="font-semibold mb-1">⚠️ SMS/WhatsApp Integration</p>
-                <p>To actually send SMS or WhatsApp messages, connect an SMS provider (e.g. Termii, Twilio, Vonage) in Settings. For now, reminders are logged in the system.</p>
-              </div>
+              {results.reasons.length > 0 && (
+                <div className="bg-amber-50 border border-amber-200 rounded-lg px-4 py-3 text-sm text-amber-800 text-left max-w-sm">
+                  <p className="font-semibold mb-1">Why some failed</p>
+                  <ul className="list-disc pl-4 space-y-0.5">
+                    {results.reasons.map((r, i) => <li key={i}>{r}</li>)}
+                  </ul>
+                </div>
+              )}
             </div>
           ) : step === "select-loans" ? (
             <div className="p-6 space-y-4">
@@ -280,6 +342,11 @@ function SendReminderModal({ onClose }: { onClose: () => void }) {
                     <div className="flex-1 min-w-0">
                       <p className="text-sm font-medium text-foreground">{loan.customer_name}</p>
                       <p className="text-xs text-muted-foreground">{loan.loan_number} · {formatCurrency(loan.outstanding_balance)} outstanding · Due {formatDate(loan.due_date)}</p>
+                      <p className="text-xs text-muted-foreground mt-0.5">
+                        Officer: {loan.assigned_officer_id ? (officerMap[loan.assigned_officer_id] || "Unknown") : (
+                          <span className="text-amber-600">Unassigned</span>
+                        )}
+                      </p>
                       {!loan.customer_phone && (
                         <p className="text-xs text-amber-600 mt-0.5">⚠ No phone number on record</p>
                       )}
@@ -312,6 +379,19 @@ function SendReminderModal({ onClose }: { onClose: () => void }) {
                   ))}
                 </div>
               </div>
+
+              {((channel === "email" && configStatus && !configStatus.emailConfigured) ||
+                (channel !== "email" && configStatus && !configStatus.smsConfigured)) && (
+                <div className="flex items-start gap-2 p-3 rounded-lg bg-amber-50 border border-amber-200 text-xs text-amber-800">
+                  <AlertTriangle className="w-4 h-4 flex-shrink-0 mt-0.5" />
+                  <span>
+                    {channel === "email"
+                      ? "Email sending isn't configured yet (RESEND_API_KEY is missing) — sends on this channel will fail."
+                      : "SMS/WhatsApp sending isn't configured yet (TERMII_API_KEY is missing) — sends on this channel will fail."}
+                    {" "}This isn't a permissions issue — it needs to be set in the app's environment variables.
+                  </span>
+                </div>
+              )}
 
               {/* Templates */}
               {templates.filter(t => t.channel === channel).length > 0 && (
@@ -427,6 +507,8 @@ export default function RemindersPage() {
   const [channelFilter, setChannelFilter] = useState("all");
   const [statusFilter, setStatusFilter] = useState("all");
   const [showSend, setShowSend] = useState(false);
+  const [refreshing, setRefreshing] = useState(false);
+  const queryClient = useQueryClient();
 
   const { data: reminders = [], isLoading } = useQuery({
     queryKey: ["reminders"],
@@ -439,6 +521,28 @@ export default function RemindersPage() {
       return (data ?? []) as Reminder[];
     },
   });
+
+  const handleForceRefresh = async () => {
+    setRefreshing(true);
+    try {
+      const [loanResult, invResult] = await Promise.all([
+        supabase.rpc("refresh_loan_statuses"),
+        supabase.rpc("refresh_investment_statuses"),
+      ]);
+      if (loanResult.error || invResult.error) {
+        toast.error((loanResult.error || invResult.error)?.message || "Failed to refresh statuses");
+      } else {
+        toast.success("Loan and investment statuses refreshed");
+        queryClient.invalidateQueries({ queryKey: ["overdue-for-reminder"] });
+        queryClient.invalidateQueries({ queryKey: ["collections"] });
+        queryClient.invalidateQueries({ queryKey: ["dashboard-loan-stats"] });
+      }
+    } catch (err) {
+      toast.error(err instanceof Error ? err.message : "Failed to refresh statuses");
+    } finally {
+      setRefreshing(false);
+    }
+  };
 
   const sent = reminders.filter(r => r.status === "sent").length;
   const failed = reminders.filter(r => r.status === "failed").length;
@@ -455,10 +559,17 @@ export default function RemindersPage() {
   return (
     <div className="p-6 space-y-6">
       <PageHeader title="Reminders" description="Track and send payment reminders to borrowers">
-        <button onClick={() => setShowSend(true)}
-          className="flex items-center gap-2 px-4 py-2 brand-gradient text-white rounded-lg text-sm font-medium hover:opacity-90">
-          <Send className="w-4 h-4" /> Send Reminders
-        </button>
+        <div className="flex items-center gap-2">
+          <button onClick={handleForceRefresh} disabled={refreshing}
+            title="Recompute overdue/due-today/due-tomorrow status on every loan and investment right now"
+            className="flex items-center gap-2 px-4 py-2 border border-border rounded-lg text-sm font-medium hover:bg-muted/40 disabled:opacity-60">
+            <RefreshCw className={`w-4 h-4 ${refreshing ? "animate-spin" : ""}`} /> {refreshing ? "Refreshing…" : "Refresh Statuses"}
+          </button>
+          <button onClick={() => setShowSend(true)}
+            className="flex items-center gap-2 px-4 py-2 brand-gradient text-white rounded-lg text-sm font-medium hover:opacity-90">
+            <Send className="w-4 h-4" /> Send Reminders
+          </button>
+        </div>
       </PageHeader>
 
       {/* Summary */}

@@ -2,6 +2,7 @@
 
 import { useQuery } from "@tanstack/react-query";
 import { supabase } from "@/lib/supabase/client";
+import { ensureStatusesFresh } from "@/lib/statusRefresh";
 import { StatCard } from "@/components/StatCard";
 import { formatCurrency, formatDate, getLoanStatusColor, getInvestmentStatusColor, formatStatus } from "@/lib/utils";
 import { StatusBadge } from "@/components/StatusBadge";
@@ -17,6 +18,7 @@ export default function DashboardPage() {
   const { data: loanStats } = useQuery({
     queryKey: ["dashboard-loan-stats"],
     queryFn: async () => {
+      await ensureStatusesFresh();
       const { data } = await supabase.from("loans").select("status, outstanding_balance, total_amount, amount_paid");
       if (!data) return null;
       const total = data.length;
