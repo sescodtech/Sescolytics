@@ -9,6 +9,7 @@ import { formatCurrency, formatDate, getLoanStatusColor, getCollectionStatusColo
 import { Search, Plus, X, DollarSign, FileDown } from "lucide-react";
 import { toast } from "sonner";
 import type { Tables } from "@/lib/supabase/types";
+import { resolveOrCreateCustomer } from "@/lib/imports/customerResolver";
 
 type Loan = Tables<"loans">;
 
@@ -44,8 +45,21 @@ function AddLoanModal({ onClose }: { onClose: () => void }) {
       const total = parseFloat(form.total_amount) || principal + interest;
       const paid = parseFloat(form.amount_paid) || 0;
       const outstanding = parseFloat(form.outstanding_balance) || total - paid;
+
+      // Link this loan to a real customer record (matching on phone/name,
+      // creating one if none exists) so features that depend on customer
+      // contact info — like emailed reminders — actually have something to
+      // join against. Without this, the loan only carries free-text
+      // name/phone and reminders silently treat the customer as having no
+      // email on file, even if one exists.
+      const resolution = await resolveOrCreateCustomer(
+        { name: form.customer_name, phone: form.customer_phone || undefined },
+        form.loan_number
+      );
+
       const { error } = await supabase.from("loans").insert({
         loan_number: form.loan_number,
+        customer_id: resolution?.customerId ?? null,
         customer_name: form.customer_name,
         customer_phone: form.customer_phone || null,
         principal_amount: principal,
