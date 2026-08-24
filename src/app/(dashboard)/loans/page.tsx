@@ -6,18 +6,156 @@ import { supabase } from "@/lib/supabase/client";
 import { PageHeader } from "@/components/PageHeader";
 import { StatusBadge } from "@/components/StatusBadge";
 import { formatCurrency, formatDate, getLoanStatusColor, getCollectionStatusColor } from "@/lib/utils";
-import { Search, Plus, X, DollarSign, FileDown } from "lucide-react";
+import { Search, Plus, X, DollarSign, FileDown, ChevronDown, UserPlus } from "lucide-react";
 import { toast } from "sonner";
 import type { Tables } from "@/lib/supabase/types";
 import { resolveOrCreateCustomer } from "@/lib/imports/customerResolver";
 
 type Loan = Tables<"loans">;
+type CustomerOption = { id: string; full_name: string; phone: string | null; email: string | null };
+
+// Generates a loan number the way a CBS reference would look:
+// LN-YYYYMMDD-#### (date-scoped, four-digit random suffix). Retried on
+// insert if it collides with the UNIQUE constraint on loans.loan_number.
+function generateLoanNumber() {
+  const now = new Date();
+  const y = now.getFullYear();
+  const m = String(now.getMonth() + 1).padStart(2, "0");
+  const d = String(now.getDate()).padStart(2, "0");
+  const rand = Math.floor(1000 + Math.random() * 9000);
+  return `LN-${y}${m}${d}-${rand}`;
+}
+
+// ── Customer picker — search existing customers or add a new one inline ──
+function CustomerPicker({
+  selected, onSelectExisting, newCustomer, onChangeNew, mode, onModeChange,
+}: {
+  selected: CustomerOption | null;
+  onSelectExisting: (c: CustomerOption) => void;
+  newCustomer: { name: string; phone: string; email: string };
+  onChangeNew: (k: "name" | "phone" | "email", v: string) => void;
+  mode: "existing" | "new";
+  onModeChange: (m: "existing" | "new") => void;
+}) {
+  const [search, setSearch] = useState("");
+  const [open, setOpen] = useState(false);
+
+  const { data: customers = [], isLoading } = useQuery({
+    queryKey: ["customers-for-loan-picker"],
+    queryFn: async () => {
+      const { data } = await supabase
+        .from("customers")
+        .select("id, full_name, phone, email")
+        .order("full_name");
+      return (data ?? []) as CustomerOption[];
+    },
+  });
+
+  const filtered = customers.filter(c =>
+    c.full_name.toLowerCase().includes(search.toLowerCase()) ||
+    (c.phone ?? "").includes(search)
+  );
+
+  return (
+    <div className="col-span-2">
+      <div className="flex items-center justify-between mb-1.5">
+        <label className="block text-sm font-medium">Customer *</label>
+        <button
+          type="button"
+          onClick={() => onModeChange(mode === "existing" ? "new" : "existing")}
+          className="text-xs font-medium text-primary hover:underline flex items-center gap-1"
+        >
+          {mode === "existing" ? (<><UserPlus className="w-3.5 h-3.5" /> New customer instead</>) : "Pick existing customer instead"}
+        </button>
+      </div>
+
+      {mode === "existing" ? (
+        <div className="relative">
+          <button
+            type="button"
+            onClick={() => setOpen(o => !o)}
+            className="w-full border border-border rounded-lg px-3 py-2.5 text-sm flex items-center justify-between text-left focus:outline-none focus:ring-2 focus:ring-primary/30"
+          >
+            <span className={selected ? "text-foreground" : "text-muted-foreground"}>
+              {selected ? `${selected.full_name}${selected.phone ? ` · ${selected.phone}` : ""}` : "Search by name or phone…"}
+            </span>
+            <ChevronDown className="w-4 h-4 text-muted-foreground flex-shrink-0" />
+          </button>
+
+          {open && (
+            <div className="absolute z-10 mt-1 w-full bg-card border border-border rounded-lg shadow-lg max-h-64 overflow-y-auto">
+              <div className="p-2 sticky top-0 bg-card border-b border-border">
+                <input
+                  autoFocus
+                  value={search}
+                  onChange={e => setSearch(e.target.value)}
+                  placeholder="Type a name or phone number…"
+                  className="w-full border border-border rounded-md px-2.5 py-1.5 text-sm focus:outline-none focus:ring-2 focus:ring-primary/30"
+                />
+              </div>
+              {isLoading && <div className="p-3 text-sm text-muted-foreground">Loading customers…</div>}
+              {!isLoading && filtered.length === 0 && (
+                <div className="p-3 text-sm text-muted-foreground">No matching customers. Try &ldquo;New customer instead&rdquo;.</div>
+              )}
+              {filtered.map(c => (
+                <button
+                  key={c.id}
+                  type="button"
+                  onClick={() => { onSelectExisting(c); setOpen(false); setSearch(""); }}
+                  className="w-full text-left px-3 py-2 text-sm hover:bg-muted/40 flex flex-col"
+                >
+                  <span className="font-medium text-foreground">{c.full_name}</span>
+                  <span className="text-xs text-muted-foreground">
+                    {c.phone || "no phone"} {c.email ? `· ${c.email}` : "· no email"}
+                  </span>
+                </button>
+              ))}
+            </div>
+          )}
+
+          {selected && !selected.email && (
+            <p className="text-xs text-amber-600 mt-1.5">
+              This customer has no email on file — email reminders won&apos;t reach them until you add one on the Customers page.
+            </p>
+          )}
+        </div>
+      ) : (
+        <div className="grid grid-cols-2 gap-3">
+          <div className="col-span-2">
+            <input
+              value={newCustomer.name}
+              onChange={e => onChangeNew("name", e.target.value)}
+              placeholder="Customer full name *"
+              className="w-full border border-border rounded-lg px-3 py-2.5 text-sm focus:outline-none focus:ring-2 focus:ring-primary/30"
+            />
+          </div>
+          <input
+            value={newCustomer.phone}
+            onChange={e => onChangeNew("phone", e.target.value)}
+            placeholder="Phone e.g. 08012345678"
+            className="w-full border border-border rounded-lg px-3 py-2.5 text-sm focus:outline-none focus:ring-2 focus:ring-primary/30"
+          />
+          <input
+            value={newCustomer.email}
+            onChange={e => onChangeNew("email", e.target.value)}
+            placeholder="Email (for reminders)"
+            type="email"
+            className="w-full border border-border rounded-lg px-3 py-2.5 text-sm focus:outline-none focus:ring-2 focus:ring-primary/30"
+          />
+        </div>
+      )}
+    </div>
+  );
+}
 
 // ── Add Loan Modal ──────────────────────────────────────────
 function AddLoanModal({ onClose }: { onClose: () => void }) {
   const queryClient = useQueryClient();
+  const [customerMode, setCustomerMode] = useState<"existing" | "new">("existing");
+  const [selectedCustomer, setSelectedCustomer] = useState<CustomerOption | null>(null);
+  const [newCustomer, setNewCustomer] = useState({ name: "", phone: "", email: "" });
   const [form, setForm] = useState({
-    loan_number: "", customer_name: "", customer_phone: "",
+    loan_number: generateLoanNumber(),
     principal_amount: "", interest_amount: "", total_amount: "",
     outstanding_balance: "", amount_paid: "0",
     start_date: new Date().toISOString().slice(0, 10),
@@ -36,44 +174,70 @@ function AddLoanModal({ onClose }: { onClose: () => void }) {
     setForm(next);
   };
 
+  const setNew = (k: "name" | "phone" | "email", v: string) => setNewCustomer(prev => ({ ...prev, [k]: v }));
+
   const mutation = useMutation({
     mutationFn: async () => {
-      if (!form.loan_number || !form.customer_name || !form.principal_amount || !form.due_date)
-        throw new Error("Loan number, customer name, principal and due date are required");
+      if (!form.loan_number || !form.principal_amount || !form.due_date)
+        throw new Error("Loan number, principal and due date are required");
+      if (customerMode === "existing" && !selectedCustomer)
+        throw new Error("Select a customer, or switch to \u201cNew customer instead\u201d");
+      if (customerMode === "new" && !newCustomer.name.trim())
+        throw new Error("Enter the new customer's name");
+
       const principal = parseFloat(form.principal_amount);
       const interest = parseFloat(form.interest_amount) || 0;
       const total = parseFloat(form.total_amount) || principal + interest;
       const paid = parseFloat(form.amount_paid) || 0;
       const outstanding = parseFloat(form.outstanding_balance) || total - paid;
 
-      // Link this loan to a real customer record (matching on phone/name,
-      // creating one if none exists) so features that depend on customer
-      // contact info — like emailed reminders — actually have something to
-      // join against. Without this, the loan only carries free-text
-      // name/phone and reminders silently treat the customer as having no
-      // email on file, even if one exists.
-      const resolution = await resolveOrCreateCustomer(
-        { name: form.customer_name, phone: form.customer_phone || undefined },
-        form.loan_number
-      );
+      // Resolve to a real customer_id either way — picking an existing
+      // customer uses their id directly; "new customer" runs it through the
+      // same resolver the bulk import uses, so it also catches an accidental
+      // duplicate (matching name/phone) instead of creating one.
+      let customerId: string | null;
+      let customerName: string;
+      let customerPhone: string | null;
 
-      const { error } = await supabase.from("loans").insert({
-        loan_number: form.loan_number,
-        customer_id: resolution?.customerId ?? null,
-        customer_name: form.customer_name,
-        customer_phone: form.customer_phone || null,
-        principal_amount: principal,
-        interest_amount: interest,
-        total_amount: total,
-        amount_paid: paid,
-        outstanding_balance: outstanding,
-        start_date: form.start_date,
-        due_date: form.due_date,
-        repayment_frequency: form.repayment_frequency as Tables<"loans">["repayment_frequency"],
-        status: outstanding <= 0 ? "completed" : "active",
-        collection_status: paid > 0 && outstanding > 0 ? "partially_paid" : "current",
-      });
-      if (error) throw error;
+      if (customerMode === "existing" && selectedCustomer) {
+        customerId = selectedCustomer.id;
+        customerName = selectedCustomer.full_name;
+        customerPhone = selectedCustomer.phone;
+      } else {
+        const resolution = await resolveOrCreateCustomer(
+          { name: newCustomer.name, phone: newCustomer.phone || undefined, email: newCustomer.email || undefined },
+          form.loan_number
+        );
+        customerId = resolution?.customerId ?? null;
+        customerName = newCustomer.name;
+        customerPhone = newCustomer.phone || null;
+      }
+
+      // Retry once with a freshly generated loan number if this one
+      // happens to collide with the UNIQUE constraint.
+      let loanNumber = form.loan_number;
+      for (let attempt = 0; attempt < 2; attempt++) {
+        const { error } = await supabase.from("loans").insert({
+          loan_number: loanNumber,
+          customer_id: customerId,
+          customer_name: customerName,
+          customer_phone: customerPhone,
+          principal_amount: principal,
+          interest_amount: interest,
+          total_amount: total,
+          amount_paid: paid,
+          outstanding_balance: outstanding,
+          start_date: form.start_date,
+          due_date: form.due_date,
+          repayment_frequency: form.repayment_frequency as Tables<"loans">["repayment_frequency"],
+          status: outstanding <= 0 ? "completed" : "active",
+          collection_status: paid > 0 && outstanding > 0 ? "partially_paid" : "current",
+        });
+        if (!error) return;
+        const isDuplicate = error.code === "23505" || /duplicate|unique/i.test(error.message);
+        if (isDuplicate && attempt === 0) { loanNumber = generateLoanNumber(); continue; }
+        throw error;
+      }
     },
     onSuccess: () => {
       toast.success("Loan record added successfully");
@@ -85,9 +249,6 @@ function AddLoanModal({ onClose }: { onClose: () => void }) {
   });
 
   const fields = [
-    { label: "Loan Number *", key: "loan_number", type: "text", placeholder: "e.g. LN-2024-001" },
-    { label: "Customer Name *", key: "customer_name", type: "text", placeholder: "e.g. Amaka Okafor" },
-    { label: "Phone", key: "customer_phone", type: "tel", placeholder: "e.g. 08012345678" },
     { label: "Principal Amount (₦) *", key: "principal_amount", type: "number", placeholder: "0.00" },
     { label: "Interest Amount (₦)", key: "interest_amount", type: "number", placeholder: "0.00" },
     { label: "Total Amount (₦)", key: "total_amount", type: "number", placeholder: "Auto-calculated" },
@@ -109,8 +270,36 @@ function AddLoanModal({ onClose }: { onClose: () => void }) {
         </div>
         <div className="flex-1 overflow-y-auto p-6">
           <div className="grid grid-cols-2 gap-4">
+            <div className="col-span-2">
+              <label className="block text-sm font-medium mb-1.5">Loan Number *</label>
+              <div className="flex gap-2">
+                <input
+                  value={form.loan_number}
+                  onChange={e => set("loan_number", e.target.value)}
+                  className="flex-1 border border-border rounded-lg px-3 py-2.5 text-sm font-mono focus:outline-none focus:ring-2 focus:ring-primary/30"
+                />
+                <button
+                  type="button"
+                  onClick={() => set("loan_number", generateLoanNumber())}
+                  className="px-3 py-2.5 border border-border rounded-lg text-xs font-medium hover:bg-muted/40 whitespace-nowrap"
+                >
+                  Regenerate
+                </button>
+              </div>
+              <p className="text-xs text-muted-foreground mt-1">Auto-generated — edit it if your CBS reference should be used instead.</p>
+            </div>
+
+            <CustomerPicker
+              selected={selectedCustomer}
+              onSelectExisting={setSelectedCustomer}
+              newCustomer={newCustomer}
+              onChangeNew={setNew}
+              mode={customerMode}
+              onModeChange={(m) => { setCustomerMode(m); setSelectedCustomer(null); }}
+            />
+
             {fields.map(({ label, key, type, placeholder }) => (
-              <div key={key} className={key === "loan_number" || key === "customer_name" ? "col-span-2" : ""}>
+              <div key={key}>
                 <label className="block text-sm font-medium mb-1.5">{label}</label>
                 <input type={type} value={(form as Record<string,string>)[key]}
                   onChange={e => set(key, e.target.value)}
