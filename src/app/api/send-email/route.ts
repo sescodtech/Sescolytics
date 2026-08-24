@@ -14,8 +14,16 @@ interface BulkEmailPayload {
 
 async function sendSingleEmail(payload: EmailPayload) {
   const apiKey = process.env.RESEND_API_KEY;
-  const fromEmail = process.env.RESEND_FROM_EMAIL || "noreply@charisbank.com";
-  const fromName = process.env.RESEND_FROM_NAME || "Charis Microfinance Bank";
+  // Resend rejects the whole call if the `from` header isn't a clean
+  // "Name <email@domain>" — a stray quote, trailing space, or missing
+  // "@domain" in RESEND_FROM_EMAIL (easy to introduce when pasting into
+  // Vercel's env var UI) is enough to fail with "Invalid `from` field".
+  // Trim + validate so a bad env var falls back to the safe default instead
+  // of silently breaking every send.
+  const emailRegex = /^[^\s@<>"]+@[^\s@<>"]+\.[^\s@<>"]+$/;
+  const rawFromEmail = (process.env.RESEND_FROM_EMAIL || "noreply@charisbank.com").trim().replace(/^["']|["']$/g, "");
+  const fromEmail = emailRegex.test(rawFromEmail) ? rawFromEmail : "noreply@charisbank.com";
+  const fromName = (process.env.RESEND_FROM_NAME || "Charis Microfinance Bank").trim().replace(/["'<>]/g, "");
 
   if (!apiKey) {
     throw new Error("RESEND_API_KEY not configured");
