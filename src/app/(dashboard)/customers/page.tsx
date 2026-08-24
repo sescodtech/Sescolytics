@@ -6,8 +6,12 @@ import { supabase } from "@/lib/supabase/client";
 import { PageHeader } from "@/components/PageHeader";
 import { StatusBadge } from "@/components/StatusBadge";
 import { formatDate } from "@/lib/utils";
-import { Search, Plus, X, User } from "lucide-react";
+import { Search, Plus, X, User, CreditCard, TrendingUp, Bell, Pencil, Check } from "lucide-react";
 import { toast } from "sonner";
+import { formatCurrency, formatDateTime, getLoanStatusColor, getCollectionStatusColor } from "@/lib/utils";
+import type { Tables } from "@/lib/supabase/types";
+
+type Customer = Tables<"customers">;
 
 function AddCustomerModal({ onClose }: { onClose: () => void }) {
   const queryClient = useQueryClient();
@@ -79,10 +83,202 @@ function AddCustomerModal({ onClose }: { onClose: () => void }) {
   );
 }
 
+function CustomerDetailDrawer({ customer, onClose }: { customer: Customer; onClose: () => void }) {
+  const queryClient = useQueryClient();
+  const [editingContact, setEditingContact] = useState(false);
+  const [phoneDraft, setPhoneDraft] = useState(customer.phone);
+  const [emailDraft, setEmailDraft] = useState(customer.email ?? "");
+  const [saving, setSaving] = useState(false);
+
+  const { data: loans = [], isLoading: loansLoading } = useQuery({
+    queryKey: ["customer-loans", customer.id],
+    queryFn: async () => {
+      const { data } = await supabase.from("loans").select("*").eq("customer_id", customer.id).order("created_at", { ascending: false });
+      return data ?? [];
+    },
+  });
+
+  const { data: investments = [], isLoading: investmentsLoading } = useQuery({
+    queryKey: ["customer-investments", customer.id],
+    queryFn: async () => {
+      const { data } = await supabase.from("investments").select("*").eq("customer_id", customer.id).order("created_at", { ascending: false });
+      return data ?? [];
+    },
+  });
+
+  const { data: reminders = [] } = useQuery({
+    queryKey: ["customer-reminders", customer.id, loans.map((l) => l.id).join(",")],
+    queryFn: async () => {
+      if (!loans.length) return [];
+      const { data } = await supabase
+        .from("reminders")
+        .select("*")
+        .in("loan_id", loans.map((l) => l.id))
+        .order("created_at", { ascending: false })
+        .limit(10);
+      return data ?? [];
+    },
+    enabled: loans.length > 0,
+  });
+
+  const saveContact = async () => {
+    setSaving(true);
+    try {
+      const { error } = await supabase.from("customers").update({ phone: phoneDraft, email: emailDraft || null }).eq("id", customer.id);
+      if (error) throw error;
+      toast.success("Contact info updated");
+      setEditingContact(false);
+      queryClient.invalidateQueries({ queryKey: ["customers"] });
+    } catch (e) {
+      toast.error(e instanceof Error ? e.message : "Failed to update");
+    } finally {
+      setSaving(false);
+    }
+  };
+
+  return (
+    <div className="fixed inset-0 z-50 flex justify-end bg-black/50">
+      <div className="bg-card w-full max-w-lg h-full overflow-y-auto border-l border-border">
+        <div className="flex items-center justify-between px-6 py-4 border-b border-border sticky top-0 bg-card z-10">
+          <div className="flex items-center gap-3 min-w-0">
+            <div className="w-9 h-9 rounded-full bg-primary/10 flex items-center justify-center flex-shrink-0">
+              <User className="w-4 h-4 text-primary" />
+            </div>
+            <div className="min-w-0">
+              <h2 className="font-semibold text-foreground truncate">{customer.full_name}</h2>
+              <p className="text-xs text-muted-foreground font-mono">{customer.customer_code}</p>
+            </div>
+          </div>
+          <button onClick={onClose} className="text-muted-foreground hover:text-foreground flex-shrink-0"><X className="w-5 h-5" /></button>
+        </div>
+
+        <div className="p-6 space-y-6">
+          {/* Contact info */}
+          <div className="bg-muted/30 rounded-lg p-4">
+            <div className="flex items-center justify-between mb-3">
+              <p className="text-xs font-semibold text-foreground uppercase tracking-wide">Contact Information</p>
+              {!editingContact ? (
+                <button onClick={() => setEditingContact(true)} className="text-xs text-primary font-medium flex items-center gap-1 hover:underline">
+                  <Pencil className="w-3 h-3" /> Edit
+                </button>
+              ) : (
+                <button onClick={saveContact} disabled={saving} className="text-xs text-success font-medium flex items-center gap-1 hover:underline disabled:opacity-60">
+                  <Check className="w-3 h-3" /> {saving ? "Saving…" : "Save"}
+                </button>
+              )}
+            </div>
+            {!editingContact ? (
+              <div className="grid grid-cols-2 gap-3 text-sm">
+                <div><p className="text-xs text-muted-foreground">Phone</p><p className="text-foreground">{customer.phone || "—"}</p></div>
+                <div>
+                  <p className="text-xs text-muted-foreground">Email</p>
+                  <p className={customer.email ? "text-foreground" : "text-amber-600"}>{customer.email || "⚠ No email on file"}</p>
+                </div>
+              </div>
+            ) : (
+              <div className="grid grid-cols-2 gap-3">
+                <input value={phoneDraft} onChange={(e) => setPhoneDraft(e.target.value)} placeholder="Phone"
+                  className="border border-border rounded-lg px-2.5 py-1.5 text-sm" />
+                <input value={emailDraft} onChange={(e) => setEmailDraft(e.target.value)} placeholder="Email"
+                  className="border border-border rounded-lg px-2.5 py-1.5 text-sm" />
+              </div>
+            )}
+          </div>
+
+          {/* Loans */}
+          <div>
+            <p className="text-xs font-semibold text-foreground uppercase tracking-wide mb-2 flex items-center gap-1.5">
+              <CreditCard className="w-3.5 h-3.5" /> Loans {loans.length > 0 && `(${loans.length})`}
+            </p>
+            {loansLoading ? (
+              <div className="h-12 bg-muted animate-pulse rounded-lg" />
+            ) : loans.length === 0 ? (
+              <p className="text-sm text-muted-foreground">No loans imported for this customer yet.</p>
+            ) : (
+              <div className="space-y-2">
+                {loans.map((l) => (
+                  <div key={l.id} className="border border-border rounded-lg p-3 flex items-center justify-between text-sm">
+                    <div>
+                      <p className="font-medium text-foreground">{l.loan_number}</p>
+                      <p className="text-xs text-muted-foreground">Due {l.due_date ? new Date(l.due_date).toLocaleDateString() : "—"}</p>
+                    </div>
+                    <div className="text-right">
+                      <p className="font-medium text-foreground">{formatCurrency(l.outstanding_balance)}</p>
+                      <StatusBadge status={l.status} colorClass={getLoanStatusColor(l.status)} />
+                    </div>
+                  </div>
+                ))}
+              </div>
+            )}
+          </div>
+
+          {/* Investments */}
+          <div>
+            <p className="text-xs font-semibold text-foreground uppercase tracking-wide mb-2 flex items-center gap-1.5">
+              <TrendingUp className="w-3.5 h-3.5" /> Investments {investments.length > 0 && `(${investments.length})`}
+            </p>
+            {investmentsLoading ? (
+              <div className="h-12 bg-muted animate-pulse rounded-lg" />
+            ) : investments.length === 0 ? (
+              <p className="text-sm text-muted-foreground">No investments imported for this customer yet.</p>
+            ) : (
+              <div className="space-y-2">
+                {investments.map((inv) => (
+                  <div key={inv.id} className="border border-border rounded-lg p-3 flex items-center justify-between text-sm">
+                    <div>
+                      <p className="font-medium text-foreground">{inv.investment_number}</p>
+                      <p className="text-xs text-muted-foreground">Matures {new Date(inv.maturity_date).toLocaleDateString()}</p>
+                    </div>
+                    <div className="text-right">
+                      <p className="font-medium text-foreground">{formatCurrency(inv.amount)}</p>
+                      <span className="text-xs text-muted-foreground capitalize">{inv.status.replace(/_/g, " ")}</span>
+                    </div>
+                  </div>
+                ))}
+              </div>
+            )}
+          </div>
+
+          {/* Reminder history */}
+          <div>
+            <p className="text-xs font-semibold text-foreground uppercase tracking-wide mb-2 flex items-center gap-1.5">
+              <Bell className="w-3.5 h-3.5" /> Recent Reminders
+            </p>
+            {reminders.length === 0 ? (
+              <p className="text-sm text-muted-foreground">No reminders sent yet.</p>
+            ) : (
+              <div className="space-y-1.5">
+                {reminders.map((r) => (
+                  <div key={r.id} className="flex items-center justify-between text-xs border-b border-border/60 pb-1.5">
+                    <span className="text-muted-foreground">{formatDateTime(r.created_at)} · {r.channel}</span>
+                    <span className={r.status === "sent" ? "text-success font-medium" : r.status === "failed" ? "text-destructive font-medium" : "text-muted-foreground"}>
+                      {r.status}{r.status === "failed" && r.error ? ` — ${r.error}` : ""}
+                    </span>
+                  </div>
+                ))}
+              </div>
+            )}
+          </div>
+
+          {loans.some((l) => ["overdue", "due_today", "due_tomorrow"].includes(l.status)) && (
+            <a
+              href={`/reminders?loanIds=${loans.filter((l) => ["overdue", "due_today", "due_tomorrow"].includes(l.status)).map((l) => l.id).join(",")}`}
+              className="block text-center px-4 py-2.5 brand-gradient text-white rounded-lg text-sm font-medium hover:opacity-90"
+            >
+              Send Reminder ({loans.filter((l) => ["overdue", "due_today", "due_tomorrow"].includes(l.status)).length} due loan{loans.filter((l) => ["overdue", "due_today", "due_tomorrow"].includes(l.status)).length > 1 ? "s" : ""})
+            </a>
+          )}
+        </div>
+      </div>
+    </div>
+  );
+}
+
 export default function CustomersPage() {
   const [search, setSearch] = useState("");
   const [statusFilter, setStatusFilter] = useState("all");
   const [showAdd, setShowAdd] = useState(false);
+  const [selectedCustomer, setSelectedCustomer] = useState<Customer | null>(null);
 
   const { data: customers = [], isLoading } = useQuery({
     queryKey: ["customers"],
@@ -152,7 +348,7 @@ export default function CustomersPage() {
                   ))}</tr>
                 ))
               ) : filtered.map(c => (
-                <tr key={c.id} className="hover:bg-muted/20 transition-colors">
+                <tr key={c.id} className="hover:bg-muted/20 transition-colors cursor-pointer" onClick={() => setSelectedCustomer(c)}>
                   <td className="px-5 py-3 font-mono text-xs text-muted-foreground">{c.customer_code}</td>
                   <td className="px-5 py-3">
                     <div className="flex items-center gap-2">
@@ -181,6 +377,7 @@ export default function CustomersPage() {
       </div>
 
       {showAdd && <AddCustomerModal onClose={() => setShowAdd(false)} />}
+      {selectedCustomer && <CustomerDetailDrawer customer={selectedCustomer} onClose={() => setSelectedCustomer(null)} />}
     </div>
   );
 }

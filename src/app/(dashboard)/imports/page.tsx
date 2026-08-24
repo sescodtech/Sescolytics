@@ -12,6 +12,12 @@ import {
 } from "lucide-react";
 import { toast } from "sonner";
 import * as XLSX from "xlsx";
+import { resolveOrCreateCustomer } from "@/lib/imports/customerResolver";
+import {
+  LOAN_FIELD_ALIASES, LOAN_FIELD_LABELS, LOAN_REQUIRED_FIELDS,
+  INVESTMENT_FIELD_ALIASES, INVESTMENT_FIELD_LABELS, INVESTMENT_REQUIRED_FIELDS,
+  detectFieldMapping, type FieldMappingEntry,
+} from "@/lib/imports/fieldMapping";
 
 // ── Types ────────────────────────────────────────────────────
 type CSVRow = Record<string, string>;
@@ -100,15 +106,15 @@ function readFile(file: File): Promise<CSVRow[]> {
 // ── Template downloads ───────────────────────────────────────
 function downloadTemplate(type: ImportType) {
   const loanData = [
-    ["loan_number", "customer_name", "customer_phone", "principal_amount", "interest_amount",
+    ["loan_number", "customer_name", "customer_phone", "customer_email", "principal_amount", "interest_amount",
       "total_amount", "amount_paid", "outstanding_balance", "start_date", "due_date", "repayment_frequency"],
-    ["LN-001", "John Adeyemi", "08012345678", "500000", "50000", "550000", "0", "550000", "2024-01-01", "2024-12-31", "monthly"],
-    ["LN-002", "Ngozi Okafor", "08098765432", "200000", "20000", "220000", "50000", "170000", "2024-02-01", "2024-08-01", "weekly"],
+    ["LN-001", "John Adeyemi", "08012345678", "john@email.com", "500000", "50000", "550000", "0", "550000", "2024-01-01", "2024-12-31", "monthly"],
+    ["LN-002", "Ngozi Okafor", "08098765432", "", "200000", "20000", "220000", "50000", "170000", "2024-02-01", "2024-08-01", "weekly"],
   ];
   const invData = [
-    ["investment_number", "customer_name", "customer_phone", "amount", "interest_rate", "duration_days", "start_date", "maturity_date", "notes"],
-    ["INV-001", "Mary Okonkwo", "08011112222", "1000000", "12.5", "365", "2024-01-01", "2024-12-31", "Fixed deposit"],
-    ["INV-002", "Emeka Chukwu", "08033334444", "500000", "10", "180", "2024-03-01", "2024-08-28", ""],
+    ["investment_number", "customer_name", "customer_phone", "customer_email", "amount", "interest_rate", "duration_days", "start_date", "maturity_date", "notes"],
+    ["INV-001", "Mary Okonkwo", "08011112222", "mary@email.com", "1000000", "12.5", "365", "2024-01-01", "2024-12-31", "Fixed deposit"],
+    ["INV-002", "Emeka Chukwu", "08033334444", "", "500000", "10", "180", "2024-03-01", "2024-08-28", ""],
   ];
   const ws = XLSX.utils.aoa_to_sheet(type === "loans" ? loanData : invData);
   const wb = XLSX.utils.book_new();
@@ -119,7 +125,7 @@ function downloadTemplate(type: ImportType) {
 // ── Import Loans ─────────────────────────────────────────────
 async function importLoans(rows: CSVRow[], fileName: string) {
   const batchId = crypto.randomUUID();
-  let success = 0, failed = 0;
+  let created = 0, updated = 0, failed = 0, needsReview = 0;
   const errors: { row: number; error: string }[] = [];
 
   await supabase.from("loan_import_batches").insert({
@@ -134,31 +140,24 @@ async function importLoans(rows: CSVRow[], fileName: string) {
   for (let i = 0; i < rows.length; i++) {
     const row = rows[i];
     try {
-      const loanNumber = col(row,
-        "loan_number", "loan number", "loan_no", "loan no", "loanno", "loan ref",
-        "loan_ref", "account_number", "account number", "acct_no", "reference"
-      );
+      const loanNumber = col(row, ...LOAN_FIELD_ALIASES.loan_number);
       if (!loanNumber) throw new Error("Missing loan number — check column name");
 
-      const customerName = col(row,
-        "customer_name", "customer name", "borrower", "borrower_name", "client",
-        "client_name", "name", "full_name", "fullname"
-      );
-      const customerPhone = col(row,
-        "customer_phone", "phone", "mobile", "phone_number", "telephone",
-        "customer_phone", "borrower_phone", "contact"
-      );
+      const customerName = col(row, ...LOAN_FIELD_ALIASES.customer_name);
+      const customerPhone = col(row, ...LOAN_FIELD_ALIASES.customer_phone);
+      const customerEmail = col(row, ...LOAN_FIELD_ALIASES.customer_email);
 
-      const principal = num(row, "principal_amount", "principal", "loan_amount", "loan amount", "disbursed_amount", "disbursed amount");
-      const interest = num(row, "interest_amount", "interest", "interest amount", "total_interest");
-      const total = num(row, "total_amount", "total amount", "total", "repayment_amount") || (principal + interest);
-      const paid = num(row, "amount_paid", "amount paid", "paid", "payment_made", "total_paid");
-      const outstanding = num(row, "outstanding_balance", "outstanding", "balance", "outstanding balance", "amount_due") || (total - paid);
+      const principal = num(row, ...LOAN_FIELD_ALIASES.principal_amount);
+      const interest = num(row, ...LOAN_FIELD_ALIASES.interest_amount);
+      const total = num(row, ...LOAN_FIELD_ALIASES.total_amount) || (principal + interest);
+      const paid = num(row, ...LOAN_FIELD_ALIASES.amount_paid);
+      const outstanding = num(row, ...LOAN_FIELD_ALIASES.outstanding_balance) || (total - paid);
 
-      const startDate = dateStr(row, "start_date", "start date", "disbursement_date", "disbursement date", "value_date", "issue_date");
-      const dueDate = dateStr(row, "due_date", "due date", "maturity_date", "maturity date", "end_date", "repayment_date");
+      const startDate = dateStr(row, ...LOAN_FIELD_ALIASES.start_date);
+      const dueDateRaw = col(row, ...LOAN_FIELD_ALIASES.due_date);
+      const dueDate = dateStr(row, ...LOAN_FIELD_ALIASES.due_date);
 
-      const rawFreq = col(row, "repayment_frequency", "frequency", "repayment_freq", "payment_frequency", "tenor_type").toLowerCase();
+      const rawFreq = col(row, ...LOAN_FIELD_ALIASES.repayment_frequency).toLowerCase();
       const freqMap: Record<string, string> = {
         daily: "daily", weekly: "weekly", biweekly: "biweekly", "bi-weekly": "biweekly",
         "bi weekly": "biweekly", monthly: "monthly", quarterly: "quarterly",
@@ -166,8 +165,17 @@ async function importLoans(rows: CSVRow[], fileName: string) {
       };
       const repaymentFreq = freqMap[rawFreq] ?? "monthly";
 
-      const { error } = await supabase.from("loans").insert({
+      // Resolve/create the customer from whatever contact info this row has —
+      // never require the user to have pre-created the customer record.
+      const resolution = customerName || customerPhone || customerEmail
+        ? await resolveOrCreateCustomer({ name: customerName, phone: customerPhone, email: customerEmail }, `${Date.now()}-${i}`)
+        : null;
+
+      if (!dueDateRaw) needsReview++;
+
+      const loanPayload = {
         loan_number: loanNumber,
+        customer_id: resolution?.customerId ?? null,
         customer_name: customerName || "Unknown",
         customer_phone: customerPhone || null,
         principal_amount: principal,
@@ -177,22 +185,24 @@ async function importLoans(rows: CSVRow[], fileName: string) {
         outstanding_balance: outstanding,
         start_date: startDate,
         due_date: dueDate,
-        status: outstanding <= 0 ? "completed" : "active",
-        collection_status: paid > 0 && outstanding > 0 ? "partially_paid" : "current",
+        status: (outstanding <= 0 ? "completed" : "active") as "active" | "completed",
+        collection_status: (paid > 0 && outstanding > 0 ? "partially_paid" : "current") as "current" | "partially_paid",
         repayment_frequency: repaymentFreq as Tables_repayment_freq,
         import_batch_id: batchId,
-      });
+      };
 
-      if (error) {
-        // Skip duplicates gracefully
-        if (error.code === "23505") {
-          errors.push({ row: i + 2, error: `Duplicate: ${loanNumber} already exists` });
-          failed++;
-        } else {
-          throw new Error(error.message);
-        }
+      // Never blindly duplicate: if this loan number already exists, update
+      // it in place instead of erroring out or creating a second row.
+      const { data: existingLoan } = await supabase.from("loans").select("id").eq("loan_number", loanNumber).maybeSingle();
+
+      if (existingLoan) {
+        const { error } = await supabase.from("loans").update(loanPayload).eq("id", existingLoan.id);
+        if (error) throw new Error(error.message);
+        updated++;
       } else {
-        success++;
+        const { error } = await supabase.from("loans").insert(loanPayload);
+        if (error) throw new Error(error.message);
+        created++;
       }
     } catch (e) {
       failed++;
@@ -202,12 +212,15 @@ async function importLoans(rows: CSVRow[], fileName: string) {
 
   await supabase.from("loan_import_batches").update({
     status: failed === rows.length ? "failed" : "completed",
-    successful_records: success,
+    successful_records: created + updated,
     failed_records: failed,
+    new_records: created,
+    updated_records: updated,
+    review_records: needsReview,
     errors_json: errors.length ? errors : null,
   }).eq("id", batchId);
 
-  return { success, failed, errors };
+  return { created, updated, failed, needsReview, errors };
 }
 
 // We need this type inline since we can't import it easily
@@ -217,7 +230,7 @@ type Tables_investment_status = "active" | "maturing_soon" | "matured" | "renewe
 // ── Import Investments ───────────────────────────────────────
 async function importInvestments(rows: CSVRow[], fileName: string) {
   const batchId = crypto.randomUUID();
-  let success = 0, failed = 0;
+  let created = 0, updated = 0, failed = 0, needsReview = 0;
   const errors: { row: number; error: string }[] = [];
 
   await supabase.from("loan_import_batches").insert({
@@ -232,67 +245,30 @@ async function importInvestments(rows: CSVRow[], fileName: string) {
   for (let i = 0; i < rows.length; i++) {
     const row = rows[i];
     try {
-      const invNumber = col(row,
-        "investment_number", "investment number", "inv_number", "inv number",
-        "inv_no", "inv no", "reference", "ref", "account_number", "account number",
-        "investment_ref", "certificate_number"
-      );
+      const invNumber = col(row, ...INVESTMENT_FIELD_ALIASES.investment_number);
       if (!invNumber) throw new Error("Missing investment number — check column name");
 
-      const customerName = col(row,
-        "customer_name", "customer name", "investor", "investor_name",
-        "client", "client_name", "name", "full_name", "depositor"
-      );
-      const customerPhone = col(row,
-        "customer_phone", "phone", "mobile", "telephone", "investor_phone", "contact"
-      );
+      const customerName = col(row, ...INVESTMENT_FIELD_ALIASES.customer_name);
+      const customerPhone = col(row, ...INVESTMENT_FIELD_ALIASES.customer_phone);
+      const customerEmail = col(row, ...INVESTMENT_FIELD_ALIASES.customer_email);
 
-      // Resolve customer
-      let customerId: string | null = null;
-      if (customerName) {
-        const { data: existing } = await supabase
-          .from("customers")
-          .select("id")
-          .ilike("full_name", customerName.trim())
-          .limit(1)
-          .maybeSingle();
+      const resolution = customerName || customerPhone || customerEmail
+        ? await resolveOrCreateCustomer({ name: customerName, phone: customerPhone, email: customerEmail }, `${Date.now()}-${i}`)
+        : null;
+      if (!resolution) throw new Error("Could not resolve customer — no name, phone, or email found on this row");
 
-        if (existing) {
-          customerId = existing.id;
-        } else {
-          const { data: newCust } = await supabase.from("customers").insert({
-            customer_code: `CUS-IMP-${Date.now()}-${i}`,
-            full_name: customerName.trim(),
-            phone: customerPhone || "N/A",
-            date_joined: new Date().toISOString().slice(0, 10),
-            status: "active",
-          }).select("id").single();
-          customerId = newCust?.id ?? null;
-        }
-      }
-      if (!customerId) throw new Error("Could not resolve customer name");
-
-      const amount = num(row,
-        "amount", "investment_amount", "investment amount", "principal",
-        "deposit_amount", "deposit amount", "face_value", "value"
-      );
-      const rate = num(row,
-        "interest_rate", "interest rate", "rate", "rate_%", "interest_%",
-        "coupon_rate", "yield", "annual_rate"
-      );
-      const startDate = dateStr(row,
-        "start_date", "start date", "value_date", "value date",
-        "issue_date", "booking_date", "date_opened"
-      );
-      const maturityDate = dateStr(row,
-        "maturity_date", "maturity date", "end_date", "due_date",
-        "expiry_date", "date_due", "rollover_date"
-      );
-      const durationRaw = num(row, "duration_days", "duration", "tenor", "tenor_days", "days");
+      const amount = num(row, ...INVESTMENT_FIELD_ALIASES.amount);
+      const rate = num(row, ...INVESTMENT_FIELD_ALIASES.interest_rate);
+      const startDate = dateStr(row, ...INVESTMENT_FIELD_ALIASES.start_date);
+      const maturityRaw = col(row, ...INVESTMENT_FIELD_ALIASES.maturity_date);
+      const maturityDate = dateStr(row, ...INVESTMENT_FIELD_ALIASES.maturity_date);
+      const durationRaw = num(row, ...INVESTMENT_FIELD_ALIASES.duration_days);
       const duration = durationRaw || Math.ceil(
         (new Date(maturityDate).getTime() - new Date(startDate).getTime()) / 86400000
       );
-      const notes = col(row, "notes", "remarks", "comment", "description", "narration");
+      const notes = col(row, ...INVESTMENT_FIELD_ALIASES.notes);
+
+      if (!maturityRaw) needsReview++;
 
       const today = new Date().toISOString().slice(0, 10);
       const daysToMaturity = Math.ceil(
@@ -302,9 +278,9 @@ async function importInvestments(rows: CSVRow[], fileName: string) {
         daysToMaturity < 0 ? "matured" :
         daysToMaturity <= 7 ? "maturing_soon" : "active";
 
-      const { error } = await supabase.from("investments").insert({
+      const invPayload = {
         investment_number: invNumber,
-        customer_id: customerId,
+        customer_id: resolution.customerId,
         amount: amount || 0,
         interest_rate: rate || 0,
         duration_days: duration || 365,
@@ -312,17 +288,18 @@ async function importInvestments(rows: CSVRow[], fileName: string) {
         maturity_date: maturityDate,
         status,
         notes: notes || null,
-      });
+      };
 
-      if (error) {
-        if (error.code === "23505") {
-          errors.push({ row: i + 2, error: `Duplicate: ${invNumber} already exists` });
-          failed++;
-        } else {
-          throw new Error(error.message);
-        }
+      const { data: existingInv } = await supabase.from("investments").select("id").eq("investment_number", invNumber).maybeSingle();
+
+      if (existingInv) {
+        const { error } = await supabase.from("investments").update(invPayload).eq("id", existingInv.id);
+        if (error) throw new Error(error.message);
+        updated++;
       } else {
-        success++;
+        const { error } = await supabase.from("investments").insert(invPayload);
+        if (error) throw new Error(error.message);
+        created++;
       }
     } catch (e) {
       failed++;
@@ -332,12 +309,15 @@ async function importInvestments(rows: CSVRow[], fileName: string) {
 
   await supabase.from("loan_import_batches").update({
     status: failed === rows.length ? "failed" : "completed",
-    successful_records: success,
+    successful_records: created + updated,
     failed_records: failed,
+    new_records: created,
+    updated_records: updated,
+    review_records: needsReview,
     errors_json: errors.length ? errors : null,
   }).eq("id", batchId);
 
-  return { success, failed, errors };
+  return { created, updated, failed, needsReview, errors };
 }
 
 // ── Main Page ────────────────────────────────────────────────
@@ -351,6 +331,7 @@ export default function ImportsPage() {
   const [fileName, setFileName] = useState("");
   const [fileType, setFileType] = useState("");
   const [columnNames, setColumnNames] = useState<string[]>([]);
+  const [fieldMapping, setFieldMapping] = useState<FieldMappingEntry[]>([]);
   const [errors, setErrors] = useState<{ row: number; error: string }[]>([]);
   const fileRef = useRef<HTMLInputElement>(null);
 
@@ -372,8 +353,15 @@ export default function ImportsPage() {
     setFileName("");
     setFileType("");
     setColumnNames([]);
+    setFieldMapping([]);
     setErrors([]);
     if (fileRef.current) fileRef.current.value = "";
+  };
+
+  const computeMapping = (columns: string[]) => {
+    return activeTab === "loans"
+      ? detectFieldMapping(columns, LOAN_FIELD_ALIASES, LOAN_FIELD_LABELS, LOAN_REQUIRED_FIELDS)
+      : detectFieldMapping(columns, INVESTMENT_FIELD_ALIASES, INVESTMENT_FIELD_LABELS, INVESTMENT_REQUIRED_FIELDS);
   };
 
   const handleFile = async (file: File) => {
@@ -394,7 +382,9 @@ export default function ImportsPage() {
       }
       setAllRows(rows);
       setPreview(rows.slice(0, 5));
-      setColumnNames(Object.keys(rows[0]));
+      const columns = Object.keys(rows[0]);
+      setColumnNames(columns);
+      setFieldMapping(computeMapping(columns));
       toast.success(`Read ${rows.length} rows from ${file.name}`);
     } catch (e) {
       toast.error("Could not read file: " + String(e instanceof Error ? e.message : e));
@@ -410,16 +400,30 @@ export default function ImportsPage() {
         ? await importLoans(allRows, fileName)
         : await importInvestments(allRows, fileName);
 
+      // A file often brings due-dates/maturity-dates that just changed the
+      // picture — refresh computed statuses immediately so reminders and
+      // dashboards reflect it right away instead of waiting on the next
+      // page load's throttled refresh.
+      await Promise.all([
+        supabase.rpc("refresh_loan_statuses"),
+        supabase.rpc("refresh_investment_statuses"),
+      ]).catch(() => {});
+
+      const summary = `${result.created} new, ${result.updated} updated${result.failed ? `, ${result.failed} failed` : ""}${result.needsReview ? `, ${result.needsReview} need review (missing date)` : ""}`;
+
       if (result.errors.length > 0) {
         setErrors(result.errors);
-        toast.warning(`${result.success} imported, ${result.failed} failed — see errors below`);
+        toast.warning(summary);
       } else {
-        toast.success(`✅ ${result.success} ${activeTab} imported successfully`);
+        toast.success(`✅ ${summary}`);
         resetFile();
       }
       queryClient.invalidateQueries({ queryKey: ["loans"] });
       queryClient.invalidateQueries({ queryKey: ["investments"] });
+      queryClient.invalidateQueries({ queryKey: ["customers"] });
       queryClient.invalidateQueries({ queryKey: ["dashboard-loan-stats"] });
+      queryClient.invalidateQueries({ queryKey: ["collections"] });
+      queryClient.invalidateQueries({ queryKey: ["overdue-for-reminder"] });
       refetch();
     } catch (e) {
       toast.error(String(e instanceof Error ? e.message : e));
@@ -529,6 +533,38 @@ export default function ImportsPage() {
             </div>
           </div>
 
+          {/* Field mapping checklist */}
+          {fieldMapping.length > 0 && (
+            <div className="px-5 py-4 border-b border-border bg-muted/20">
+              <p className="text-xs font-semibold text-foreground mb-2.5">
+                {allRows.length} records detected — {fieldMapping.filter(f => f.matchedColumn).length} of {fieldMapping.length} fields recognised
+                {fieldMapping.some(f => !f.matchedColumn) && (
+                  <span className="text-amber-600"> · {fieldMapping.filter(f => !f.matchedColumn).length} field(s) could not be identified</span>
+                )}
+              </p>
+              <div className="grid grid-cols-2 sm:grid-cols-3 gap-x-4 gap-y-1.5">
+                {fieldMapping.map(f => (
+                  <div key={f.field} className="flex items-center gap-1.5 text-xs">
+                    {f.matchedColumn ? (
+                      <CheckCircle className="w-3.5 h-3.5 text-success flex-shrink-0" />
+                    ) : (
+                      <AlertCircle className={`w-3.5 h-3.5 flex-shrink-0 ${f.required ? "text-destructive" : "text-muted-foreground/50"}`} />
+                    )}
+                    <span className={f.matchedColumn ? "text-foreground" : "text-muted-foreground"}>
+                      {f.label}{f.required && !f.matchedColumn && <span className="text-destructive"> *</span>}
+                    </span>
+                    {f.matchedColumn && <span className="text-muted-foreground font-mono truncate">({f.matchedColumn})</span>}
+                  </div>
+                ))}
+              </div>
+              {fieldMapping.filter(f => f.required && !f.matchedColumn).length > 0 && (
+                <p className="text-xs text-destructive mt-2.5">
+                  ⚠ A required field is missing — rows without it will fail to import. Check your file's column names.
+                </p>
+              )}
+            </div>
+          )}
+
           <div className="overflow-x-auto">
             <table className="w-full text-xs">
               <thead>
@@ -589,8 +625,10 @@ export default function ImportsPage() {
                 <tr className="border-b border-border bg-muted/30">
                   <th className="text-left px-5 py-3 text-xs font-medium text-muted-foreground">Filename</th>
                   <th className="text-right px-5 py-3 text-xs font-medium text-muted-foreground">Total</th>
-                  <th className="text-right px-5 py-3 text-xs font-medium text-muted-foreground">Success</th>
+                  <th className="text-right px-5 py-3 text-xs font-medium text-muted-foreground">New</th>
+                  <th className="text-right px-5 py-3 text-xs font-medium text-muted-foreground">Updated</th>
                   <th className="text-right px-5 py-3 text-xs font-medium text-muted-foreground">Failed</th>
+                  <th className="text-right px-5 py-3 text-xs font-medium text-muted-foreground">Review</th>
                   <th className="text-left px-5 py-3 text-xs font-medium text-muted-foreground">Date</th>
                   <th className="text-left px-5 py-3 text-xs font-medium text-muted-foreground">Status</th>
                 </tr>
@@ -598,7 +636,7 @@ export default function ImportsPage() {
               <tbody className="divide-y divide-border">
                 {isLoading ? (
                   Array.from({ length: 3 }).map((_, i) => (
-                    <tr key={i}>{Array.from({ length: 6 }).map((_, j) => (
+                    <tr key={i}>{Array.from({ length: 8 }).map((_, j) => (
                       <td key={j} className="px-5 py-3"><div className="h-4 bg-muted animate-pulse rounded" /></td>
                     ))}</tr>
                   ))
@@ -615,12 +653,18 @@ export default function ImportsPage() {
                     <td className="px-5 py-3 text-right text-foreground">{b.total_records}</td>
                     <td className="px-5 py-3 text-right">
                       <span className="flex items-center justify-end gap-1 text-success font-medium">
-                        <CheckCircle className="w-3.5 h-3.5" /> {b.successful_records}
+                        <CheckCircle className="w-3.5 h-3.5" /> {b.new_records ?? 0}
                       </span>
                     </td>
+                    <td className="px-5 py-3 text-right text-primary font-medium">{b.updated_records ?? 0}</td>
                     <td className="px-5 py-3 text-right">
                       <span className={`flex items-center justify-end gap-1 font-medium ${b.failed_records > 0 ? "text-destructive" : "text-muted-foreground"}`}>
                         <XCircle className="w-3.5 h-3.5" /> {b.failed_records}
+                      </span>
+                    </td>
+                    <td className="px-5 py-3 text-right">
+                      <span className={`font-medium ${(b.review_records ?? 0) > 0 ? "text-amber-600" : "text-muted-foreground"}`}>
+                        {b.review_records ?? 0}
                       </span>
                     </td>
                     <td className="px-5 py-3 text-muted-foreground text-xs">{formatDateTime(b.created_at)}</td>
@@ -631,7 +675,7 @@ export default function ImportsPage() {
                 ))}
                 {!isLoading && activeBatches.length === 0 && (
                   <tr>
-                    <td colSpan={6} className="px-5 py-10 text-center text-muted-foreground">
+                    <td colSpan={8} className="px-5 py-10 text-center text-muted-foreground">
                       No imports yet — upload a file above to get started
                     </td>
                   </tr>

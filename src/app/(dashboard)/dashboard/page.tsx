@@ -76,6 +76,19 @@ export default function DashboardPage() {
     },
   });
 
+  const { data: attentionLoans } = useQuery({
+    queryKey: ["dashboard-attention-loans"],
+    queryFn: async () => {
+      const { data } = await supabase
+        .from("loans")
+        .select("id, loan_number, customer_name, outstanding_balance, status, due_date")
+        .in("status", ["overdue", "due_today", "due_tomorrow"])
+        .neq("collection_status", "fully_paid")
+        .order("outstanding_balance", { ascending: false });
+      return data ?? [];
+    },
+  });
+
   const { data: repaymentData } = useQuery({
     queryKey: ["dashboard-repayments"],
     queryFn: async () => {
@@ -112,6 +125,31 @@ export default function DashboardPage() {
           <span className="text-xs font-medium text-success">Live</span>
         </div>
       </div>
+
+      {/* Needs attention — real bulk-reminder entry point, not just a count */}
+      {attentionLoans && attentionLoans.length > 0 && (
+        <div className="bg-card rounded-xl border border-amber-200 bg-amber-50/50 p-5 shadow-sm flex items-center justify-between gap-4 flex-wrap">
+          <div className="flex items-center gap-3">
+            <div className="w-10 h-10 rounded-lg bg-amber-100 flex items-center justify-center flex-shrink-0">
+              <AlertTriangle className="w-5 h-5 text-amber-600" />
+            </div>
+            <div>
+              <p className="text-sm font-semibold text-foreground">
+                {attentionLoans.length} loan{attentionLoans.length > 1 ? "s" : ""} need{attentionLoans.length === 1 ? "s" : ""} attention today
+              </p>
+              <p className="text-xs text-muted-foreground mt-0.5">
+                Overdue, due today, or due tomorrow · {formatCurrency(attentionLoans.reduce((s, l) => s + l.outstanding_balance, 0))} outstanding
+              </p>
+            </div>
+          </div>
+          <a
+            href={`/reminders?loanIds=${attentionLoans.map((l) => l.id).join(",")}`}
+            className="flex items-center gap-2 px-4 py-2 brand-gradient text-white rounded-lg text-sm font-medium hover:opacity-90 flex-shrink-0"
+          >
+            Send Reminders
+          </a>
+        </div>
+      )}
 
       {/* Stat cards */}
       <div className="grid grid-cols-2 lg:grid-cols-4 gap-4">

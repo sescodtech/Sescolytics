@@ -5,6 +5,7 @@ import { useRouter } from "next/navigation";
 import { supabase } from "@/lib/supabase/client";
 import { toast } from "sonner";
 import { Building2, Lock, Mail, Eye, EyeOff } from "lucide-react";
+import { useAppSettings } from "@/lib/appSettings";
 
 export default function LoginPage() {
   const router = useRouter();
@@ -12,6 +13,9 @@ export default function LoginPage() {
   const [password, setPassword] = useState("");
   const [showPassword, setShowPassword] = useState(false);
   const [loading, setLoading] = useState(false);
+  const { data: appSettings } = useAppSettings();
+  const appName = appSettings?.appName || "ILRMS";
+  const orgName = appSettings?.orgName || "Charis Microfinance Bank";
 
   const handleLogin = async (e: React.FormEvent) => {
     e.preventDefault();
@@ -43,8 +47,8 @@ export default function LoginPage() {
             <div className="w-16 h-16 rounded-full bg-white/15 flex items-center justify-center mx-auto mb-4 border-2 border-white/30">
               <Building2 className="w-8 h-8 text-white" />
             </div>
-            <h1 className="text-2xl font-display font-bold text-white">ILRMS</h1>
-            <p className="text-blue-100 text-sm mt-1">Charis Microfinance Bank</p>
+            <h1 className="text-2xl font-display font-bold text-white">{appName}</h1>
+            <p className="text-blue-100 text-sm mt-1">{orgName}</p>
             <p className="text-white/60 text-xs mt-0.5">Investment & Loan Recovery Management System</p>
           </div>
 
@@ -111,7 +115,7 @@ export default function LoginPage() {
           {/* Footer */}
           <div className="px-8 py-4 bg-muted/40 border-t border-border text-center">
             <p className="text-xs text-muted-foreground">
-              Authorized personnel only · © {new Date().getFullYear()} Charis Microfinance Bank
+              Authorized personnel only · © {new Date().getFullYear()} {orgName}
             </p>
           </div>
         </div>

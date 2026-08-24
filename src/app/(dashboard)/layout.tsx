@@ -10,6 +10,7 @@ import {
   Settings, LogOut, Building2, ChevronLeft, Menu, X, UserPlus, ScanSearch
 } from "lucide-react";
 import { cn } from "@/lib/utils";
+import { useAppSettings } from "@/lib/appSettings";
 
 const navItems = [
   { href: "/dashboard", label: "Dashboard", icon: LayoutDashboard },
@@ -35,6 +36,9 @@ export default function DashboardLayout({ children }: { children: React.ReactNod
   const pathname = usePathname();
   const [collapsed, setCollapsed] = useState(false);
   const [mobileOpen, setMobileOpen] = useState(false);
+  const { data: appSettings } = useAppSettings();
+  const appName = appSettings?.appName || "ILRMS";
+  const orgName = appSettings?.orgName || "Charis Microfinance Bank";
 
   useEffect(() => {
     if (!loading && !user) {
@@ -42,12 +46,16 @@ export default function DashboardLayout({ children }: { children: React.ReactNod
     }
   }, [user, loading, router]);
 
+  useEffect(() => {
+    if (appSettings) document.title = `${appSettings.appName} — ${appSettings.orgName}`;
+  }, [appSettings]);
+
   if (loading) {
     return (
       <div className="min-h-screen flex items-center justify-center brand-gradient">
         <div className="text-center text-white">
           <div className="w-10 h-10 border-3 border-white/30 border-t-white rounded-full animate-spin mx-auto mb-3" />
-          <p className="text-sm opacity-70">Loading ILRMS...</p>
+          <p className="text-sm opacity-70">Loading {appName}...</p>
         </div>
       </div>
     );
@@ -69,8 +77,8 @@ export default function DashboardLayout({ children }: { children: React.ReactNod
         </div>
         {!collapsed && (
           <div>
-            <p className="text-sm font-display font-bold text-white leading-none">ILRMS</p>
-            <p className="text-[10px] text-sidebar-foreground/50 leading-none mt-0.5">Charis MFB</p>
+            <p className="text-sm font-display font-bold text-white leading-none">{appName}</p>
+            <p className="text-[10px] text-sidebar-foreground/50 leading-none mt-0.5">{orgName}</p>
           </div>
         )}
       </div>
@@ -169,7 +177,7 @@ export default function DashboardLayout({ children }: { children: React.ReactNod
           </button>
           <div className="flex items-center gap-2">
             <Building2 className="w-4 h-4 text-primary" />
-            <span className="font-display font-bold text-sm text-foreground">ILRMS</span>
+            <span className="font-display font-bold text-sm text-foreground">{appName}</span>
           </div>
           <button onClick={() => setMobileOpen(false)} className="ml-auto text-muted-foreground">
             {mobileOpen && <X className="w-5 h-5" />}

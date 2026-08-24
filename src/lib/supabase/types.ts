@@ -211,9 +211,12 @@ export type Database = {
           failed_records: number
           filename: string
           id: string
+          new_records: number
+          review_records: number
           status: "processing" | "completed" | "failed"
           successful_records: number
           total_records: number
+          updated_records: number
           uploaded_by: string | null
         }
         Insert: {
@@ -222,9 +225,12 @@ export type Database = {
           failed_records?: number
           filename: string
           id?: string
+          new_records?: number
+          review_records?: number
           status?: "processing" | "completed" | "failed"
           successful_records?: number
           total_records?: number
+          updated_records?: number
           uploaded_by?: string | null
         }
         Update: {
@@ -233,9 +239,12 @@ export type Database = {
           failed_records?: number
           filename?: string
           id?: string
+          new_records?: number
+          review_records?: number
           status?: "processing" | "completed" | "failed"
           successful_records?: number
           total_records?: number
+          updated_records?: number
           uploaded_by?: string | null
         }
         Relationships: []

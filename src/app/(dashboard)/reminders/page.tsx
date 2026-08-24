@@ -1,6 +1,6 @@
 "use client";
 
-import { useState } from "react";
+import { useState, useEffect } from "react";
 import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
 import { supabase } from "@/lib/supabase/client";
 import { ensureStatusesFresh } from "@/lib/statusRefresh";
@@ -55,7 +55,7 @@ function fillTemplate(body: string, loan: OverdueLoan): string {
     .replace(/{due_date}/g, formatDate(loan.due_date));
 }
 
-function SendReminderModal({ onClose }: { onClose: () => void }) {
+function SendReminderModal({ onClose, initialLoanIds }: { onClose: () => void; initialLoanIds?: string[] }) {
   const queryClient = useQueryClient();
   const [step, setStep] = useState<"select-loans" | "compose" | "preview">("select-loans");
   const [selectedLoans, setSelectedLoans] = useState<Set<string>>(new Set());
@@ -82,6 +82,19 @@ function SendReminderModal({ onClose }: { onClose: () => void }) {
       })) as OverdueLoan[];
     },
   });
+
+  // Arriving here from Dashboard or a Customer profile ("Send Reminder" with
+  // specific loans already in mind) — preselect those loans and skip
+  // straight to composing instead of making the person re-pick them.
+  useEffect(() => {
+    if (!initialLoanIds?.length || !overdueLoans.length) return;
+    const validIds = initialLoanIds.filter((id) => overdueLoans.some((l) => l.id === id));
+    if (validIds.length > 0) {
+      setSelectedLoans(new Set(validIds));
+      setStep("compose");
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [overdueLoans.length]);
 
   const { data: configStatus } = useQuery({
     queryKey: ["reminder-config-status"],
@@ -508,7 +521,21 @@ export default function RemindersPage() {
   const [statusFilter, setStatusFilter] = useState("all");
   const [showSend, setShowSend] = useState(false);
   const [refreshing, setRefreshing] = useState(false);
+  const [deepLinkLoanIds, setDeepLinkLoanIds] = useState<string[] | undefined>(undefined);
   const queryClient = useQueryClient();
+
+  // Deep link from Dashboard / a Customer profile: /reminders?loanIds=id1,id2
+  // opens the send modal with those loans already selected instead of
+  // making the person hunt for them again in the picker.
+  useEffect(() => {
+    const params = new URLSearchParams(window.location.search);
+    const raw = params.get("loanIds");
+    if (raw) {
+      setDeepLinkLoanIds(raw.split(",").filter(Boolean));
+      setShowSend(true);
+      window.history.replaceState({}, "", window.location.pathname);
+    }
+  }, []);
 
   const { data: reminders = [], isLoading } = useQuery({
     queryKey: ["reminders"],
@@ -665,7 +692,12 @@ export default function RemindersPage() {
         )}
       </div>
 
-      {showSend && <SendReminderModal onClose={() => setShowSend(false)} />}
+      {showSend && (
+        <SendReminderModal
+          onClose={() => { setShowSend(false); setDeepLinkLoanIds(undefined); }}
+          initialLoanIds={deepLinkLoanIds}
+        />
+      )}
     </div>
   );
 }
