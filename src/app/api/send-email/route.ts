@@ -12,25 +12,8 @@ interface BulkEmailPayload {
   recipients: EmailPayload[];
 }
 
-async function sendSingleEmail(payload: EmailPayload) {
-  const apiKey = process.env.RESEND_API_KEY;
-  // Resend rejects the whole call if the `from` header isn't a clean
-  // "Name <email@domain>" — a stray quote, trailing space, or missing
-  // "@domain" in RESEND_FROM_EMAIL (easy to introduce when pasting into
-  // Vercel's env var UI) is enough to fail with "Invalid `from` field".
-  // Trim + validate so a bad env var falls back to the safe default instead
-  // of silently breaking every send.
-  const emailRegex = /^[^\s@<>"]+@[^\s@<>"]+\.[^\s@<>"]+$/;
-  const rawFromEmail = (process.env.RESEND_FROM_EMAIL || "noreply@charisbank.com").trim().replace(/^["']|["']$/g, "");
-  const fromEmail = emailRegex.test(rawFromEmail) ? rawFromEmail : "noreply@charisbank.com";
-  const fromName = (process.env.RESEND_FROM_NAME || "Charis Microfinance Bank").trim().replace(/["'<>]/g, "");
-
-  if (!apiKey) {
-    throw new Error("RESEND_API_KEY not configured");
-  }
-
-  // Build HTML email
-  const html = `
+function buildHtml(payload: EmailPayload) {
+  return `
 <!DOCTYPE html>
 <html>
 <head>
@@ -77,7 +60,7 @@ async function sendSingleEmail(payload: EmailPayload) {
                   To make payment or enquire, contact us:
                 </p>
                 <p style="margin:0;color:#0A2540;font-size:13px;font-weight:600;">
-                  ${process.env.BANK_PHONE ?? "08000000000"} &nbsp;|&nbsp; ${process.env.BANK_EMAIL ?? "info@charisbank.com"}
+                  ${process.env.BANK_PHONE ?? "Contact us for phone number"} &nbsp;|&nbsp; ${process.env.BANK_EMAIL ?? "Contact us for email"}
                 </p>
               </div>
             </td>
@@ -100,6 +83,36 @@ async function sendSingleEmail(payload: EmailPayload) {
   </table>
 </body>
 </html>`;
+}
+
+// Strips stray quotes/brackets that are easy to introduce when pasting into
+// Vercel's env var UI, and rejects an already-wrapped "Name <email>" value
+// being passed as the *email* var (which would double-wrap into an invalid
+// header — the exact bug that broke this before).
+function cleanFromParts(rawEmail: string, rawName: string) {
+  const emailRegex = /^[^\s@<>"]+@[^\s@<>"]+\.[^\s@<>"]+$/;
+  const email = rawEmail.trim().replace(/^["']|["']$/g, "");
+  const name = rawName.trim().replace(/["'<>]/g, "");
+  return { email: emailRegex.test(email) ? email : null, name };
+}
+
+async function sendSingleEmail(payload: EmailPayload) {
+  const apiKey = process.env.RESEND_API_KEY;
+  if (!apiKey) throw new Error("RESEND_API_KEY not configured");
+
+  // No hardcoded domain here on purpose: falling back to a placeholder
+  // domain would silently send from a domain that was never verified in
+  // Resend, producing a confusing "domain not verified" error that points
+  // at the wrong domain entirely. If RESEND_FROM_EMAIL is missing or
+  // malformed, fail loudly and say so — that's more useful than guessing.
+  const rawFromEmail = process.env.RESEND_FROM_EMAIL;
+  if (!rawFromEmail) {
+    throw new Error("RESEND_FROM_EMAIL not configured — set it to an address on your verified Resend domain");
+  }
+  const { email, name } = cleanFromParts(rawFromEmail, process.env.RESEND_FROM_NAME || "Charis Microfinance Bank");
+  if (!email) {
+    throw new Error(`RESEND_FROM_EMAIL ("${rawFromEmail}") isn't a valid plain email address — use just the address, e.g. reminders@yourdomain.com, not a "Name <email>" wrapper`);
+  }
 
   const response = await fetch("https://api.resend.com/emails", {
     method: "POST",
@@ -108,20 +121,16 @@ async function sendSingleEmail(payload: EmailPayload) {
       "Authorization": `Bearer ${apiKey}`,
     },
     body: JSON.stringify({
-      from: `${fromName} <${fromEmail}>`,
+      from: `${name} <${email}>`,
       to: [payload.to],
       subject: payload.subject,
-      html,
-      text: payload.message, // plain text fallback
+      html: buildHtml(payload),
+      text: payload.message,
     }),
   });
 
   const data = await response.json();
-
-  if (!response.ok) {
-    throw new Error(data.message || `Resend error: ${response.status}`);
-  }
-
+  if (!response.ok) throw new Error(data.message || `Resend error: ${response.status}`);
   return { success: true, emailId: data.id };
 }
 
