@@ -6,7 +6,7 @@
 
 import * as XLSX from "xlsx";
 import Papa from "papaparse";
-import type { FileKind, RawParsedRow } from "./types";
+import type { FileKind, RawParsedRow, PositionedToken } from "./types";
 import { extractRowsFromMatrix } from "./tableDetector";
 
 export type ProgressFn = (message: string, pct?: number) => void;
@@ -83,6 +83,8 @@ export interface PdfExtraction {
   isScanned: boolean;
   pageCount: number;
   lines: string[];
+  /** Word-level positions per page, top-down (smaller y = higher up the page). Empty page arrays are kept for index alignment. */
+  tokensByPage: PositionedToken[][];
 }
 
 async function getPdfJs() {
@@ -99,21 +101,42 @@ export async function extractPdf(file: File, onProgress?: ProgressFn): Promise<P
   const doc = await pdfjs.getDocument({ data: buf }).promise;
   const pageCount = doc.numPages;
   const lines: string[] = [];
+  const tokensByPage: PositionedToken[][] = [];
   let totalChars = 0;
 
   for (let i = 1; i <= pageCount; i++) {
     onProgress?.(`Reading page ${i} of ${pageCount}`, (i / pageCount) * 40);
     const page = await doc.getPage(i);
     const content = await page.getTextContent();
-    // Group text items into lines by their Y position.
+    const pageTokens: PositionedToken[] = [];
+
+    // Group text items into lines by their Y position (for the plain-text
+    // view used by fallback parsing + metadata sniffing) while separately
+    // keeping every word's exact position (for column reconstruction).
     const rowsByY = new Map<number, { x: number; str: string }[]>();
-    for (const item of content.items as { str: string; transform: number[] }[]) {
-      if (!("str" in item)) continue;
+    for (const item of content.items as { str: string; transform: number[]; width?: number; height?: number }[]) {
+      if (!("str" in item) || !item.str.trim()) continue;
       const y = Math.round(item.transform[5]);
       const x = item.transform[4];
       if (!rowsByY.has(y)) rowsByY.set(y, []);
       rowsByY.get(y)!.push({ x, str: item.str });
+
+      // PDF space is bottom-up (larger y = higher on the page) — negate so
+      // smaller values are consistently "further up the page" like every
+      // other coordinate source (canvas/OCR) feeding into pdfTable.ts.
+      const fontHeight = Math.abs(item.transform[3]) || 10;
+      pageTokens.push({
+        text: item.str,
+        x,
+        y: -item.transform[5],
+        width: item.width ?? item.str.length * fontHeight * 0.5,
+        height: fontHeight,
+        page: i,
+        confidence: 100,
+      });
     }
+    tokensByPage.push(pageTokens);
+
     const sortedY = Array.from(rowsByY.keys()).sort((a, b) => b - a);
     for (const y of sortedY) {
       const lineText = rowsByY
@@ -134,65 +157,189 @@ export async function extractPdf(file: File, onProgress?: ProgressFn): Promise<P
   const isScanned = avgCharsPerPage < 20;
 
   if (!isScanned) {
-    return { isScanned: false, pageCount, lines };
+    return { isScanned: false, pageCount, lines, tokensByPage };
   }
 
   // ── OCR fallback for scanned / image-based PDFs ──────────────────────
   onProgress?.("No text layer found — running OCR", 40);
-  const ocrLines = await ocrPdf(doc, pageCount, onProgress);
-  return { isScanned: true, pageCount, lines: ocrLines };
+  const { lines: ocrLines, tokensByPage: ocrTokens } = await ocrPdf(doc, pageCount, onProgress);
+  return { isScanned: true, pageCount, lines: ocrLines, tokensByPage: ocrTokens };
+}
+
+// ── Image preprocessing for OCR ─────────────────────────────────────────
+// Scanned bank statements are frequently low-contrast photocopies/phone
+// photos. Converting to grayscale and applying a global (Otsu) threshold to
+// binarize the image measurably improves Tesseract's accuracy on this kind
+// of document without needing a server-side image library.
+function preprocessCanvasForOcr(source: HTMLCanvasElement): HTMLCanvasElement {
+  const ctx = source.getContext("2d")!;
+  const { width, height } = source;
+  const imageData = ctx.getImageData(0, 0, width, height);
+  const data = imageData.data;
+  const gray = new Uint8ClampedArray(width * height);
+
+  for (let p = 0; p < gray.length; p++) {
+    const o = p * 4;
+    // Standard luminance-weighted grayscale.
+    gray[p] = 0.299 * data[o] + 0.587 * data[o + 1] + 0.114 * data[o + 2];
+  }
+
+  // Otsu's method: pick the threshold that best separates ink from
+  // background based on the image's own brightness histogram.
+  const hist = new Array(256).fill(0);
+  for (let p = 0; p < gray.length; p++) hist[gray[p]]++;
+  const total = gray.length;
+  let sum = 0;
+  for (let t = 0; t < 256; t++) sum += t * hist[t];
+  let sumB = 0;
+  let wB = 0;
+  let maxVar = 0;
+  let threshold = 128;
+  for (let t = 0; t < 256; t++) {
+    wB += hist[t];
+    if (wB === 0) continue;
+    const wF = total - wB;
+    if (wF === 0) break;
+    sumB += t * hist[t];
+    const mB = sumB / wB;
+    const mF = (sum - sumB) / wF;
+    const between = wB * wF * (mB - mF) * (mB - mF);
+    if (between > maxVar) {
+      maxVar = between;
+      threshold = t;
+    }
+  }
+
+  for (let p = 0; p < gray.length; p++) {
+    const v = gray[p] > threshold ? 255 : 0;
+    const o = p * 4;
+    data[o] = data[o + 1] = data[o + 2] = v;
+  }
+  ctx.putImageData(imageData, 0, 0);
+  return source;
+}
+
+interface OcrWord {
+  text: string;
+  bbox: { x0: number; y0: number; x1: number; y1: number };
+  confidence: number;
 }
 
 async function ocrPdf(
   doc: import("pdfjs-dist").PDFDocumentProxy,
   pageCount: number,
   onProgress?: ProgressFn
-): Promise<string[]> {
+): Promise<{ lines: string[]; tokensByPage: PositionedToken[][] }> {
   const { createWorker } = await import("tesseract.js");
   const worker = await createWorker("eng");
   const lines: string[] = [];
+  const tokensByPage: PositionedToken[][] = [];
 
   try {
     for (let i = 1; i <= pageCount; i++) {
       onProgress?.(`OCR — scanning page ${i} of ${pageCount}`, 40 + (i / pageCount) * 50);
       const page = await doc.getPage(i);
-      const viewport = page.getViewport({ scale: 2.2 }); // higher scale = better OCR accuracy
+      const viewport = page.getViewport({ scale: 2.5 }); // higher scale = better OCR accuracy on small statement fonts
       const canvas = document.createElement("canvas");
       canvas.width = viewport.width;
       canvas.height = viewport.height;
       const ctx = canvas.getContext("2d")!;
       await page.render({ canvasContext: ctx, viewport }).promise;
+      preprocessCanvasForOcr(canvas);
 
-      const {
-        data: { text },
-      } = await worker.recognize(canvas);
+      const result = await worker.recognize(canvas, {}, { blocks: true });
+      const text = result.data.text;
       text
         .split("\n")
         .map((l) => l.trim())
         .filter(Boolean)
         .forEach((l) => lines.push(l));
+
+      const pageTokens: PositionedToken[] = [];
+      const words = extractWordsFromResult(result.data);
+      for (const w of words) {
+        if (!w.text.trim()) continue;
+        pageTokens.push({
+          text: w.text,
+          x: w.bbox.x0,
+          y: w.bbox.y0, // canvas space is already top-down
+          width: Math.max(1, w.bbox.x1 - w.bbox.x0),
+          height: Math.max(1, w.bbox.y1 - w.bbox.y0),
+          page: i,
+          confidence: w.confidence,
+        });
+      }
+      tokensByPage.push(pageTokens);
     }
   } finally {
     await worker.terminate();
   }
 
-  return lines;
+  return { lines, tokensByPage };
+}
+
+// Tesseract.js v5 nests word boxes under blocks→paragraphs→lines→words when
+// `blocks: true` is requested; fall back to a flat `words` array for older
+// worker versions rather than assuming one shape.
+function extractWordsFromResult(data: unknown): OcrWord[] {
+  const words: OcrWord[] = [];
+  const d = data as { words?: OcrWord[]; blocks?: unknown[] };
+  if (Array.isArray(d.words)) return d.words;
+  if (Array.isArray(d.blocks)) {
+    for (const block of d.blocks as Record<string, unknown>[]) {
+      const paragraphs = (block.paragraphs as Record<string, unknown>[]) || [];
+      for (const para of paragraphs) {
+        const lines = (para.lines as Record<string, unknown>[]) || [];
+        for (const line of lines) {
+          const lineWords = (line.words as OcrWord[]) || [];
+          words.push(...lineWords);
+        }
+      }
+    }
+  }
+  return words;
 }
 
 // ── Image files (single-page scanned statement as a photo) ─────────────
-export async function extractImage(file: File, onProgress?: ProgressFn): Promise<string[]> {
+export async function extractImage(
+  file: File,
+  onProgress?: ProgressFn
+): Promise<{ lines: string[]; tokens: PositionedToken[] }> {
   const { createWorker } = await import("tesseract.js");
-  onProgress?.("Running OCR on image", 20);
+  onProgress?.("Preparing image", 10);
+
+  // Route the file through the same grayscale+threshold preprocessing used
+  // for scanned PDF pages, rather than handing Tesseract the raw photo.
+  const bitmap = await createImageBitmap(file);
+  const canvas = document.createElement("canvas");
+  canvas.width = bitmap.width;
+  canvas.height = bitmap.height;
+  const ctx = canvas.getContext("2d")!;
+  ctx.drawImage(bitmap, 0, 0);
+  preprocessCanvasForOcr(canvas);
+
+  onProgress?.("Running OCR on image", 25);
   const worker = await createWorker("eng");
   try {
-    const {
-      data: { text },
-    } = await worker.recognize(file);
+    const result = await worker.recognize(canvas, {}, { blocks: true });
     onProgress?.("OCR complete", 90);
-    return text
+    const lines = result.data.text
       .split("\n")
       .map((l) => l.trim())
       .filter(Boolean);
+    const words = extractWordsFromResult(result.data);
+    const tokens: PositionedToken[] = words
+      .filter((w) => w.text.trim())
+      .map((w) => ({
+        text: w.text,
+        x: w.bbox.x0,
+        y: w.bbox.y0,
+        width: Math.max(1, w.bbox.x1 - w.bbox.x0),
+        height: Math.max(1, w.bbox.y1 - w.bbox.y0),
+        page: 1,
+        confidence: w.confidence,
+      }));
+    return { lines, tokens };
   } finally {
     await worker.terminate();
   }

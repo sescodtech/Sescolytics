@@ -8,6 +8,23 @@ export type FileKind = "csv" | "xlsx" | "pdf_text" | "pdf_scanned" | "image";
 
 export type RawParsedRow = Record<string, string>;
 
+// ── Positioned tokens (text-layer PDF words or OCR words) ──────────────────
+// A single unit of text with its location on the page, used to reconstruct
+// the statement's actual table layout instead of guessing from raw numbers.
+// `y` is normalised so that SMALLER values are further up the page (top-down
+// reading order) regardless of the source's native coordinate system —
+// callers must convert PDF's bottom-up y before constructing these.
+export interface PositionedToken {
+  text: string;
+  x: number;
+  y: number;
+  width: number;
+  height: number;
+  page: number; // 1-indexed
+  /** 0-100. 100/undefined for text-layer PDF tokens (exact); OCR word confidence otherwise. */
+  confidence?: number;
+}
+
 export type Direction = "inflow" | "outflow";
 
 export interface NormalizedTransaction {
@@ -37,6 +54,12 @@ export interface ExtractionResult {
   accountNumberGuess?: string;
   accountNameGuess?: string;
   warnings: string[];
+  /** Best-effort, from an "Opening Balance"/"Balance B/F" line — used to validate running balances. */
+  openingBalanceGuess?: number | null;
+  /** Best-effort, from a "Closing Balance"/"Balance C/F" line — cross-checked against the last row. */
+  closingBalanceGuess?: number | null;
+  /** True when column positions were used to map the table (PDF/OCR); false when the line-scan fallback was used. */
+  columnLayoutDetected?: boolean;
 }
 
 export interface CategoryBreakdown {

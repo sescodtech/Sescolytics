@@ -112,8 +112,9 @@ function buildTransaction(params: {
   balance: number | null;
   sourceRow?: number;
   raw: Record<string, unknown>;
+  ocrConfidence?: number;
 }): Omit<NormalizedTransaction, "dedupeHash" | "isDuplicate"> {
-  const { date, narration, debit, credit, balance, sourceRow, raw } = params;
+  const { date, narration, debit, credit, balance, sourceRow, raw, ocrConfidence } = params;
   const direction: Direction = credit > debit ? "inflow" : "outflow";
   const amountForCategory = direction === "inflow" ? credit : debit;
 
@@ -134,6 +135,14 @@ function buildTransaction(params: {
   if (debit > 0 && credit > 0) {
     reasons.push("Both debit and credit amounts present on the same row — verify manually");
     confidence -= 0.2;
+  }
+  // OCR word confidence (0-100) for this row's tokens, when the source was a
+  // scanned/image statement — low confidence means the digits/text may have
+  // been misread even though a value was extracted, so it's flagged rather
+  // than silently trusted.
+  if (ocrConfidence !== undefined && ocrConfidence < 70) {
+    reasons.push(`Low OCR confidence (${Math.round(ocrConfidence)}%) — verify against the original document`);
+    confidence -= ocrConfidence < 50 ? 0.35 : 0.2;
   }
   confidence = Math.max(0, Math.min(1, confidence));
 
@@ -172,13 +181,21 @@ export async function normalizeMappedRows(
     // Single "amount" column + a Dr/Cr indicator column (common in some banks)
     if (!mapping.debit && !mapping.credit && mapping.amount) {
       const amt = parseAmount(row[mapping.amount]);
-      const typeVal = (mapping.type ? row[mapping.type] : "").toLowerCase();
-      const isCredit = /\bcr\b|credit|deposit|\bin\b/.test(typeVal) || amt > 0 && !/\bdr\b|debit|withdrawal|\bout\b/.test(typeVal);
-      if (amt < 0 || /\bdr\b|debit|withdrawal|\bout\b/.test(typeVal)) debit = Math.abs(amt);
-      else if (isCredit) credit = Math.abs(amt);
+      const rawAmountCell = (row[mapping.amount] || "").toLowerCase();
+      // The Dr/Cr indicator sometimes lives in its own column, but on many
+      // PDF/OCR layouts it's suffixed directly onto the amount cell itself
+      // (e.g. "5,000.00 DR") with no separate column at all — check both.
+      const typeVal = `${mapping.type ? row[mapping.type] : ""} ${rawAmountCell}`.toLowerCase();
+      const isDebit = /\bdr\b|debit|withdrawal|\bout\b/.test(typeVal);
+      const isCredit = /\bcr\b|credit|deposit|\bin\b/.test(typeVal);
+      if (amt < 0 || (isDebit && !isCredit)) debit = Math.abs(amt);
+      else if (isCredit && !isDebit) credit = Math.abs(amt);
+      else if (amt !== 0) credit = Math.abs(amt); // no reliable indicator either way — default matches prior behaviour
     }
 
     const balance = mapping.balance ? parseAmount(row[mapping.balance]) : null;
+    const ocrConfidenceRaw = row["__ocr_confidence__"];
+    const ocrConfidence = ocrConfidenceRaw !== undefined ? parseFloat(ocrConfidenceRaw) : undefined;
 
     out.push(
       buildTransaction({
@@ -189,6 +206,7 @@ export async function normalizeMappedRows(
         balance: mapping.balance ? balance : null,
         sourceRow: idx + 2, // +2 = header row + 1-index
         raw: row,
+        ocrConfidence: ocrConfidence !== undefined && !isNaN(ocrConfidence) ? ocrConfidence : undefined,
       })
     );
   });
@@ -243,6 +261,73 @@ export async function normalizeParsedLines(lines: ParsedLine[]): Promise<Normali
   });
 
   return finalizeDedup(out);
+}
+
+// ── Stage 3b: validate running balances mathematically ──────────────────
+// Rather than trusting whichever column got labelled "debit" vs "credit",
+// cross-check every row's printed balance against the previous balance +
+// this row's movement. A statement's own balance column is ground truth
+// wherever it's present, so this both catches genuine extraction errors
+// (flag it) and resolves the common case of a swapped debit/credit column
+// (auto-correct it, since the arithmetic proves which way it goes).
+const BALANCE_EPSILON = 1.0; // naira — allows for rounding / unprinted fees
+
+export function applyRunningBalanceValidation(
+  transactions: NormalizedTransaction[],
+  openingBalance?: number | null
+): NormalizedTransaction[] {
+  const out = [...transactions];
+  let prevBalance: number | null = openingBalance ?? null;
+
+  for (let i = 0; i < out.length; i++) {
+    const t = out[i];
+    if (t.isDuplicate) continue; // don't let an excluded duplicate break the chain
+    if (t.balance === null) {
+      continue; // nothing to check this row against — keep prevBalance as-is
+    }
+    if (prevBalance === null) {
+      prevBalance = t.balance; // seed the chain from the first row that has one
+      continue;
+    }
+
+    const expected = prevBalance + t.credit - t.debit;
+    const expectedSwapped = prevBalance + t.debit - t.credit;
+    const diffNormal = Math.abs(expected - t.balance);
+    const diffSwapped = Math.abs(expectedSwapped - t.balance);
+
+    if (diffNormal <= BALANCE_EPSILON) {
+      // Consistent — nothing to do.
+    } else if (diffSwapped <= BALANCE_EPSILON && (t.debit > 0 || t.credit > 0)) {
+      const swapped: NormalizedTransaction = {
+        ...t,
+        debit: t.credit,
+        credit: t.debit,
+        direction: t.debit > t.credit ? "inflow" : "outflow", // post-swap values
+      };
+      swapped.direction = swapped.credit > swapped.debit ? "inflow" : "outflow";
+      swapped.category = categorizeTransaction(swapped.narration, swapped.direction);
+      swapped.reviewReason = [swapped.reviewReason, "Debit/credit were swapped — corrected using the statement's running balance"]
+        .filter(Boolean)
+        .join("; ");
+      out[i] = swapped;
+    } else {
+      out[i] = {
+        ...t,
+        needsReview: true,
+        confidence: Math.min(t.confidence, 0.5),
+        reviewReason: [
+          t.reviewReason,
+          `Running balance mismatch — expected ~${expected.toFixed(2)} from the previous balance, statement shows ${t.balance.toFixed(2)}`,
+        ]
+          .filter(Boolean)
+          .join("; "),
+      };
+    }
+
+    prevBalance = out[i].balance;
+  }
+
+  return out;
 }
 
 async function finalizeDedup(

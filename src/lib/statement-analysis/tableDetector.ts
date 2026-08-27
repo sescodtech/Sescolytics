@@ -20,7 +20,7 @@ export const FIELD_ALIASES = {
   balance: ["balance", "running balance", "closing balance", "available balance", "ledger balance"],
 } as const;
 
-function normHeader(h: string): string {
+export function normHeader(h: string): string {
   return h.toLowerCase().trim().replace(/[_\-]+/g, " ").replace(/\s+/g, " ");
 }
 
@@ -68,9 +68,9 @@ export function detectColumnMapping(rows: RawParsedRow[]): ColumnMapping {
 // looks like a transaction header (matches the most known field aliases),
 // and treat that as the header row — everything above it is ignored.
 
-const ALL_ALIASES: string[] = Object.values(FIELD_ALIASES).flat() as string[];
+export const ALL_ALIASES: string[] = Object.values(FIELD_ALIASES).flat() as string[];
 
-function scoreHeaderRow(cells: string[]): number {
+export function scoreHeaderRow(cells: string[]): number {
   let score = 0;
   for (const cell of cells) {
     const nh = normHeader(String(cell ?? ""));
@@ -230,14 +230,15 @@ export function parseStatementLines(lines: string[]): ParsedLine[] {
 // ── Bank / account metadata sniffing (best effort) ─────────────────────
 // Only ever look at the top-of-document letterhead/account-summary block,
 // never the full transaction list — a bank code or counterparty name
-// buried in a narration ("TRSF TO FCMB...") would otherwise false-match
-// as the issuing bank.
-const BANK_NAMES = [
-  "Charis Microfinance Bank Limited", "Access Bank", "GTBank", "Guaranty Trust Bank", "Zenith Bank",
-  "First Bank", "UBA", "United Bank for Africa", "Fidelity Bank", "Union Bank", "Sterling Bank",
-  "Stanbic IBTC", "Wema Bank", "Polaris Bank", "Ecobank", "FCMB", "Keystone Bank", "Unity Bank",
-  "Providus Bank", "Jaiz Bank", "Heritage Bank", "Kuda", "Opay", "Moniepoint", "Palmpay",
-];
+// buried in a narration ("TRSF TO FCMB...") would otherwise false-match.
+//
+// Bank name is intentionally NOT guessed here. A loose "any line containing
+// the word bank" match was producing wrong/junk names on statements that
+// don't carry a clean letterhead line (disclaimers, addresses, narrations
+// mentioning another bank, etc.) — worse than just leaving it blank. The UI
+// already shows "Bank not detected" when this is absent, so there's no
+// downside to only detecting what we can actually be confident about
+// (account number / account name).
 
 const METADATA_STOPWORDS = [
   "statement", "period", "account", "number", "product", "name", "balance", "opening",
@@ -245,34 +246,117 @@ const METADATA_STOPWORDS = [
   "amount", "outstanding", "ngn", "narration", "value", "date", "transaction",
 ];
 
-function titleCase(s: string): string {
-  return s
-    .toLowerCase()
-    .replace(/\b\w/g, (c) => c.toUpperCase())
-    .trim();
+// ── Post-processing for column-mapped PDF/OCR rows ──────────────────────
+// These operate on the *same* RawParsedRow[] shape produced for CSV/XLSX,
+// after detectColumnMapping() has already run, so they apply equally to
+// any source — but in practice only PDF/OCR extraction hits these paths
+// (CSV/XLSX exports don't wrap narrations across lines or repeat their
+// header mid-file the way a rendered/scanned statement does).
+
+/**
+ * Some narrations wrap onto a second physical line with no date/amount of
+ * their own (common on both text-layer and scanned statements). Detect rows
+ * that have narration text but no date and no amount in any mapped numeric
+ * column, and fold them into the *previous* row's narration instead of
+ * treating them as a separate (bad) transaction. This also transparently
+ * handles a transaction whose description wraps across a page break, since
+ * rows are built in document order regardless of page boundaries.
+ */
+export function mergeContinuationRows(rows: RawParsedRow[], mapping: ColumnMapping): RawParsedRow[] {
+  if (!mapping.narration) return rows;
+  const out: RawParsedRow[] = [];
+
+  const hasAmount = (row: RawParsedRow): boolean => {
+    const fields = [mapping.debit, mapping.credit, mapping.amount].filter(Boolean) as string[];
+    return fields.some((f) => {
+      const v = (row[f] || "").replace(/[₦,\s()]/g, "");
+      return v !== "" && v !== "0" && v !== "0.00" && !isNaN(parseFloat(v));
+    });
+  };
+  const hasDate = (row: RawParsedRow): boolean => !!(mapping.date && (row[mapping.date] || "").trim());
+
+  for (const row of rows) {
+    const narrationText = (row[mapping.narration] || "").trim();
+    const isContinuation = out.length > 0 && !hasDate(row) && !hasAmount(row) && narrationText.length > 0;
+    if (isContinuation) {
+      const prev = out[out.length - 1];
+      prev[mapping.narration] = `${prev[mapping.narration] || ""} ${narrationText}`.trim();
+      continue;
+    }
+    out.push(row);
+  }
+  return out;
+}
+
+const FOOTER_NOISE_PATTERNS: RegExp[] = [
+  /^page\s*\d+(\s*(of|\/)\s*\d+)?$/i,
+  /^\d+\s*(of|\/)\s*\d+$/,
+  /^end of statement$/i,
+  /^this is a computer[- ]generated (statement|document)/i,
+  /^generated (on|by)/i,
+  /^continued? on next page/i,
+  /^\*+\s*end/i,
+];
+
+/**
+ * Drop rows that aren't real transactions: a repeated column header printed
+ * again on later pages, page-number/footer boilerplate, and fully blank
+ * rows. Kept separate from mergeContinuationRows so each pass has one job.
+ */
+export function stripNoiseRows(rows: RawParsedRow[], headers: string[]): RawParsedRow[] {
+  return rows.filter((row) => {
+    const cells = headers.map((h) => (row[h] || "").trim());
+    const nonEmpty = cells.filter(Boolean);
+    if (nonEmpty.length === 0) return false; // fully blank
+
+    // Repeated header row (e.g. "Date | Narration | Debit | Credit | Balance"
+    // printed again at the top of page 2, 3, ...).
+    if (nonEmpty.length >= 2 && scoreHeaderRow(cells) >= Math.min(3, nonEmpty.length)) return false;
+
+    // Single stray cell matching known footer/page-number boilerplate.
+    if (nonEmpty.length === 1 && FOOTER_NOISE_PATTERNS.some((re) => re.test(nonEmpty[0]))) return false;
+
+    return true;
+  });
+}
+
+// ── Opening / closing balance detection ─────────────────────────────────
+// Scanned only from the top-of-document and bottom-of-document lines (never
+// the full transaction list) so a narration like "Balance brought forward
+// transfer" can't false-match.
+const OPENING_BALANCE_RE = /(opening\s*balance|balance\s*b\/?f|balance\s*brought\s*forward)[:\s]*[₦]?\s*([\d,]+\.?\d{0,2})/i;
+const CLOSING_BALANCE_RE = /(closing\s*balance|balance\s*c\/?f|balance\s*carried\s*forward)[:\s]*[₦]?\s*([\d,]+\.?\d{0,2})/i;
+
+function parseMoneyToken(v: string): number | null {
+  const n = parseFloat(v.replace(/,/g, ""));
+  return isNaN(n) ? null : n;
+}
+
+export function detectOpeningClosingBalance(lines: string[]): { opening: number | null; closing: number | null } {
+  let opening: number | null = null;
+  let closing: number | null = null;
+
+  for (const line of lines.slice(0, 60)) {
+    if (opening === null) {
+      const m = line.match(OPENING_BALANCE_RE);
+      if (m) opening = parseMoneyToken(m[2]);
+    }
+  }
+  for (const line of lines.slice(-60)) {
+    const m = line.match(CLOSING_BALANCE_RE);
+    if (m) closing = parseMoneyToken(m[2]); // keep scanning — prefer the last match near the end
+  }
+
+  return { opening, closing };
 }
 
 export function guessStatementMetadata(lines: string[]): {
-  bankName?: string;
   accountNumber?: string;
   accountName?: string;
 } {
-  const out: { bankName?: string; accountNumber?: string; accountName?: string } = {};
+  const out: { accountNumber?: string; accountName?: string } = {};
   const headerLines = lines.slice(0, 40).filter((l) => l && l.trim());
   const headerText = headerLines.join(" \n ");
-
-  for (const bank of BANK_NAMES) {
-    if (new RegExp(bank.replace(/\s+/g, "\\s*"), "i").test(headerText)) {
-      out.bankName = bank;
-      break;
-    }
-  }
-  // Generic fallback for banks not in the known list: any short top-of-document
-  // line that mentions "bank".
-  if (!out.bankName) {
-    const bankLine = headerLines.find((l) => /\bbank\b/i.test(l) && l.trim().length < 60);
-    if (bankLine) out.bankName = titleCase(bankLine.replace(/[^A-Za-z .&-]/g, " ").replace(/\s+/g, " ").trim());
-  }
 
   const acctMatch = headerText.match(/account\s*(?:no\.?|number)?[:\s]*([0-9]{10,})/i);
   if (acctMatch) out.accountNumber = acctMatch[1];
@@ -284,14 +368,13 @@ export function guessStatementMetadata(lines: string[]): {
     // Many statements print the customer's name as its own unlabelled line
     // near the top (right after the bank's own letterhead), rather than
     // behind an "Account Name:" label. Look for that pattern: a short,
-    // mostly-uppercase, digit-free line that isn't the bank name and isn't
-    // one of the statement's own field labels.
+    // mostly-uppercase, digit-free line that isn't a statement field label
+    // and doesn't itself look like a bank/institution name.
     const candidate = headerLines.find((l) => {
       const t = l.trim();
       if (t.length < 4 || t.length > 60) return false;
       if (/\d/.test(t)) return false;
       if (/\bbank\b/i.test(t)) return false;
-      if (out.bankName && t.toUpperCase().includes(out.bankName.toUpperCase())) return false;
       const words = t.split(/\s+/).filter(Boolean);
       if (words.length < 2 || words.length > 6) return false;
       const lower = t.toLowerCase();
